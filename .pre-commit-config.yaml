@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+repos:
+  # SPDX copyright header check
+  - repo: local
+    hooks:
+      - id: copyright-header
+        name: copyright header
+        entry: python3 scripts/lint/check_copyright.py
+        language: system
+        files: '\.(rs|go|py|pyi|toml|yaml|yml|md|mjs|js|ts|h|sh)$|\.gitignore$'
+        exclude: '(/SKILL\.md|index\.js|index\.d\.ts|nemo_flow\.h|node_modules/|target/|\.venv/|pkg/|^\.github/pull_request_template\.md)$'
+
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '^(ATTRIBUTIONS-(Rust|Python|Node)\.md|patches/.*\.patch)$'
+      - id: end-of-file-fixer
+        exclude: '^(ATTRIBUTIONS-(Rust|Python|Node)\.md|patches/.*\.patch)$'
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+        exclude: '^ATTRIBUTIONS-(Rust|Python|Node)\.md$'
+
+  # Python — ruff lint + format
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.0
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  # Python — type checking
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty (type check)
+        entry: uv run ty check . --exclude docs/** --exclude third_party/** --exclude ./examples/** --exclude .cache/** --exclude .claude/**
+        language: system
+        types: [python]
+        pass_filenames: false
+
+  # Documentation — link validation
+  - repo: https://github.com/lycheeverse/lychee.git
+    rev: lychee-v0.23.0
+    hooks:
+      - id: lychee
+        name: docs markdown linkcheck
+        args: ["--no-progress", "--include-fragments"]
+        files: '^(README\.md|CONTRIBUTING\.md|docs/.*\.md)$'
+
+  # Rust — fmt + clippy + cargo-deny
+  - repo: local
+    hooks:
+      - id: ffi-header-sync
+        name: ffi header sync
+        entry: cargo check -p nemo-flow-ffi
+        language: system
+        files: '^crates/ffi/(Cargo\.toml|cbindgen\.toml|nemo_flow\.h|src/.*\.rs)$'
+        pass_filenames: false
+
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-check
+        name: cargo check
+        entry: cargo check --workspace --all-targets
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-deny
+        name: cargo deny
+        entry: cargo deny check
+        language: system
+        files: '(Cargo\.toml|Cargo\.lock|deny\.toml)$'
+        pass_filenames: false
+
+      - id: attributions-rust
+        name: ATTRIBUTIONS-Rust.md (Cargo.lock)
+        entry: bash scripts/generate_attributions.sh rust
+        language: system
+        files: '^Cargo\.lock$'
+        pass_filenames: false
+
+      - id: attributions-python
+        name: ATTRIBUTIONS-Python.md (uv.lock)
+        entry: bash scripts/generate_attributions.sh python
+        language: system
+        files: '^uv\.lock$'
+        pass_filenames: false
+
+      - id: attributions-node
+        name: ATTRIBUTIONS-Node.md (crates/node/package-lock.json)
+        entry: bash scripts/generate_attributions.sh node
+        language: system
+        files: '^crates/node/package-lock\.json$'
+        pass_filenames: false
+
+  # Go — fmt + vet
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: go fmt
+        entry: gofmt -l -w
+        language: system
+        types: [go]
+
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'cd go/nemo_flow && go vet ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+  # JavaScript / TypeScript — format
+  - repo: local
+    hooks:
+      - id: node-prettier-check
+        name: node prettier check
+        entry: node scripts/lint/prettier-precommit.mjs
+        language: system
+        files: '^(crates/node|crates/wasm/(wrappers|tests-js|scripts))/.*\.(?:[cm]?js|[mc]?ts|tsx)$'
+        pass_filenames: false
+
+      - id: node-docstrings-check
+        name: node docstrings check
+        entry: node scripts/lint/check_public_docstrings.mjs all
+        language: system
+        files: '^(?:(?:crates/node|crates/wasm/wrappers/(?:esm|nodejs))/(?:plugin|adaptive|typed)\.(?:js|d\.ts))$'
+        pass_filenames: false

@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ci:
+  - '.github/actionlint.yaml'
+  - '.github/ci-path-filters.yml'
+  - '.github/workflows/**'
+
+shared:
+  - 'crates/adaptive/**'
+  - 'crates/core/**'
+  - 'justfile'
+  - 'rust-toolchain.toml'
+
+docs:
+  - 'CONTRIBUTING.md'
+  - 'README.md'
+  - 'crates/adaptive/**'
+  - 'crates/core/**'
+  - 'crates/node/*.d.ts'
+  - 'crates/node/*.js'
+  - 'crates/**/*.md'
+  - 'docs/**'
+  - 'python/nemo_flow/**'
+  - 'scripts/build-docs.sh'
+  - 'scripts/docs/**'
+
+rust:
+  - 'Cargo.lock'
+  - 'Cargo.toml'
+  - 'crates/**/Cargo.toml'
+  - 'crates/**/*.rs'
+  - 'crates/ffi/cbindgen.toml'
+
+go:
+  - 'crates/ffi/**'
+  - 'go/**'
+
+node:
+  - 'crates/node/**'
+  - 'scripts/test-support/**'
+
+python:
+  - 'crates/python/**'
+  - 'pyproject.toml'
+  - 'python/**'
+  - 'uv.lock'
+
+wasm:
+  - 'crates/wasm/**'
+  - 'scripts/test-support/**'

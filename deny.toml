@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[bans]
+skip = [
+    { crate = "winnow@1.0.1", reason = "build-only duplicate internal to cbindgen's TOML parser stack" },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0 WITH LLVM-exception",
+    "Apache-2.0",
+    "BSD-3-Clause", # required by redis crate
+    "BSL-1.0",      # Boost Software License, required by xxhash-rust
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+]
+private = { ignore = true }

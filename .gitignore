@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Rust
+/target
+
+# Python
+/.venv
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.so
+python/nemo_flow/_native*.so
+
+# Python (Windows)
+python/nemo_flow/_native*.pyd
+
+# Go
+go/nemo_flow/nemo_flow_test
+go/nemo_flow/nemo_flow_test.exe
+
+# Node.js (NAPI-RS)
+node_modules/
+crates/node/*.node
+crates/node/index.js
+crates/node/index.d.ts
+crates/node/coverage/
+crates/node/junit.xml
+
+# WASM
+crates/wasm/pkg/
+crates/wasm/pkg-test/
+crates/wasm/package-lock.json
+
+# Shared libraries
+*.dylib
+*.dll
+
+# Testing / caches
+.pytest_cache/
+.uv-cache/
+.cache/pre-commit/
+.coverage
+*.profraw
+*.profdata
+go/nemo_flow/coverage.out
+go_junit_report.xml
+*.dSYM/
+
+# OS — macOS
+.DS_Store
+
+# OS — Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# OS — Linux
+*~
+.directory
+
+# Temporary files
+.tmp/
+.planning/
+.claude/commands/
+.env
+benchmarks/
+
+# Local third-party upstream checkouts. These are bootstrapped from
+# third_party/sources.lock and are intentionally excluded from the tracked
+# first-party repository surface.
+third_party/langchain/
+third_party/langchain-nvidia/
+third_party/langgraph/
+third_party/hermes-agent/
+third_party/openclaw/
+third_party/opencode/
+
+# documentation
+docs/_build/**/*
+docs/reference/api/**/_generated/
+docs/reference/api/**/_source/
+**/release-notes.md
+CHANGELOG.md
+
+crates/wasm/coverage/
+.scannerwork/

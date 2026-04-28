@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "nemo-flow"
+dynamic = ["version"]
+requires-python = ">=3.11"
+
+[tool.maturin]
+manifest-path = "crates/python/Cargo.toml"
+python-source = "python"
+module-name = "nemo_flow._native"
+features = ["pyo3/extension-module"]
+
+[dependency-groups]
+dev = [
+    "ipython~=8.20",
+    "maturin[zig]>=1.0,<2.0; sys_platform == 'linux'",
+    "maturin>=1.0,<2.0; sys_platform != 'linux'",
+    "pip-licenses>=5,<6",
+    "pre-commit~=4.0",
+    "ruff~=0.11",
+    "ty>=0.0.1a7",
+    "uv~=0.10.0",
+]
+test = [
+    "pydantic>=2",
+    "pytest>=8",
+    "pytest-asyncio>=0.26",
+    "pytest-cov~=7.0",
+]
+docs = [
+    "myst-parser~=4.0",
+    "nvidia-sphinx-theme~=0.0.9",
+    "packaging>=24,<26",
+    "sphinx>=8,<9",
+    "sphinx-autoapi~=3.8",
+    "sphinx-design~=0.6",
+    "sphinx-js~=5.0",
+    "sphinx-multiversion~=0.2",
+    "sphinxcontrib-rust>=1.0,<1.1",
+    "sphinxcontrib-mermaid~=1.0",
+]
+
+[tool.uv]
+default-groups = ["dev", "test"]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests", "third_party/langgraph_tests"]
+asyncio_mode = "auto"
+
+[tool.ty.analysis]
+# nemo_flow._native is a compiled Rust extension (built by maturin) that only
+# exists after `uv sync` / `pip install -e .`. Suppress unresolved-import for it.
+allowed-unresolved-imports = ["nemo_flow._native", "pytest"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.maturin.sbom]
+rust = true
+auditwheel = true

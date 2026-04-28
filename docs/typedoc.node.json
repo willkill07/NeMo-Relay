@@ -1,0 +1,8 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "NeMo Flow Node.js API",
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "sort": ["source-order"]
+}

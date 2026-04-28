@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+changelog:
+  exclude:
+    authors:
+      - octocat
+      - dependabot[bot]
+      - dependabot-preview[bot]
+      - GPUtester
+  categories:
+    - title: 💥 Breaking Changes
+      labels:
+        - breaking
+    - title: ✨ New Features
+      labels:
+        - feat
+    - title: ⚡ Improvements
+      labels:
+        - perf
+        - refactor
+    - title: 🐛 Bug Fixes
+      labels:
+        - fix
+        - revert
+    - title: 🧰 Maintenance
+      labels:
+        - build
+        - chore
+        - ci
+        - style
+        - test
+    - title: 📝 Documentation Updates
+      labels:
+        - doc
+    - title: Other Changes
+      labels:
+        - "*"
