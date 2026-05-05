@@ -5,6 +5,7 @@
 members = [
     "crates/core",
     "crates/adaptive",
+    "crates/sidecar",
     # Language Bindings
     "crates/python",
     "crates/ffi",

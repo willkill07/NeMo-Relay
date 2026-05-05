@@ -1,0 +1,43 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use axum::http::HeaderMap;
+use serde_json::{Value, json};
+
+use crate::adapters::{AdapterOutcome, ClassificationRules, classify};
+use crate::model::{AgentKind, NormalizedEvent};
+
+pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
+    let event = classify(
+        &payload,
+        headers,
+        &ClassificationRules {
+            kind: AgentKind::Cursor,
+            agent_start: &["sessionStart", "session_start"],
+            agent_end: &["sessionEnd", "session_end", "stop"],
+            subagent_start: &["subagentStart", "subagent_start"],
+            subagent_end: &["subagentStop", "subagentEnd", "subagent_stop"],
+            tool_start: &["preToolUse", "beforeShellExecution", "beforeMCPExecution"],
+            tool_end: &[
+                "postToolUse",
+                "afterShellExecution",
+                "afterMCPExecution",
+                "postToolUseFailure",
+            ],
+        },
+    );
+    let response = match &event {
+        NormalizedEvent::ToolStarted(_) => json!({
+            "continue": true,
+            "permission": "allow",
+            "user_message": null,
+            "agent_message": null
+        }),
+        NormalizedEvent::AgentEnded(_) => json!({ "continue": true }),
+        _ => json!({ "continue": true }),
+    };
+    AdapterOutcome {
+        events: vec![event],
+        response,
+    }
+}
