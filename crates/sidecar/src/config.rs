@@ -202,3 +202,91 @@ impl GatewayMode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+    use serde_json::json;
+
+    fn config() -> SidecarConfig {
+        SidecarConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            openai_base_url: "http://openai".into(),
+            anthropic_base_url: "http://anthropic".into(),
+            atif_dir: Some(PathBuf::from("default-atif")),
+            openinference_endpoint: Some("http://default-otel".into()),
+        }
+    }
+
+    #[test]
+    fn session_config_prefers_headers_and_parses_json() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-nemo-flow-atif-dir",
+            HeaderValue::from_static("header-atif"),
+        );
+        headers.insert(
+            "x-nemo-flow-openinference-endpoint",
+            HeaderValue::from_static("http://header-otel"),
+        );
+        headers.insert(
+            "x-nemo-flow-config-profile",
+            HeaderValue::from_static("profile-a"),
+        );
+        headers.insert(
+            "x-nemo-flow-session-metadata",
+            HeaderValue::from_static(r#"{"team":"obs"}"#),
+        );
+        headers.insert(
+            "x-nemo-flow-plugin-config",
+            HeaderValue::from_static(r#"{"components":[]}"#),
+        );
+        headers.insert(
+            "x-nemo-flow-gateway-mode",
+            HeaderValue::from_static("required"),
+        );
+
+        let session = config().session_config_from_headers(&headers);
+
+        assert_eq!(session.atif_dir, Some(PathBuf::from("header-atif")));
+        assert_eq!(
+            session.openinference_endpoint.as_deref(),
+            Some("http://header-otel")
+        );
+        assert_eq!(session.profile.as_deref(), Some("profile-a"));
+        assert_eq!(session.metadata, Some(json!({ "team": "obs" })));
+        assert_eq!(session.plugin_config, Some(json!({ "components": [] })));
+        assert_eq!(session.gateway_mode.as_deref(), Some("required"));
+    }
+
+    #[test]
+    fn session_config_uses_defaults_and_ignores_bad_json() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-nemo-flow-session-metadata",
+            HeaderValue::from_static("not-json"),
+        );
+        headers.insert("x-empty", HeaderValue::from_static(""));
+
+        let session = config().session_config_from_headers(&headers);
+
+        assert_eq!(session.atif_dir, Some(PathBuf::from("default-atif")));
+        assert_eq!(
+            session.openinference_endpoint.as_deref(),
+            Some("http://default-otel")
+        );
+        assert_eq!(session.metadata, None);
+        assert_eq!(header_string(&headers, "x-empty"), None);
+    }
+
+    #[test]
+    fn agent_and_gateway_mode_arguments_are_stable() {
+        assert_eq!(CodingAgent::ClaudeCode.hook_path(), "/hooks/claude-code");
+        assert_eq!(CodingAgent::Codex.hook_path(), "/hooks/codex");
+        assert_eq!(CodingAgent::Cursor.hook_path(), "/hooks/cursor");
+        assert_eq!(GatewayMode::HookOnly.as_arg(), "hook-only");
+        assert_eq!(GatewayMode::Passthrough.as_arg(), "passthrough");
+        assert_eq!(GatewayMode::Required.as_arg(), "required");
+    }
+}

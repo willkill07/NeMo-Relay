@@ -259,6 +259,49 @@ mod tests {
         assert_eq!(bytes, Bytes::from_static(b"data: one\n\ndata: two\n\n"));
     }
 
+    #[tokio::test]
+    async fn gateway_rejects_unsupported_paths() {
+        let app = router(test_config());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/unsupported")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn models_route_forwards_get_requests() {
+        let upstream = spawn_models_upstream().await;
+        let mut config = test_config();
+        config.openai_base_url = upstream;
+        let app = router(config);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/models?limit=1")
+                    .header("authorization", "Bearer test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["path"], json!("/v1/models?limit=1"));
+        assert_eq!(body["authorization"], json!("Bearer test"));
+    }
+
     async fn spawn_upstream(streaming: bool) -> String {
         async fn chat(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
             let payload: Value = serde_json::from_slice(&body).unwrap();
@@ -289,6 +332,25 @@ mod tests {
         } else {
             Router::new().route("/v1/chat/completions", post(chat))
         };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    async fn spawn_models_upstream() -> String {
+        async fn models(headers: HeaderMap, request: Request<Body>) -> impl IntoResponse {
+            Json(json!({
+                "path": request.uri().path_and_query().map(|value| value.as_str()),
+                "authorization": headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+            }))
+        }
+
+        let app = Router::new().route("/v1/models", get(models));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
