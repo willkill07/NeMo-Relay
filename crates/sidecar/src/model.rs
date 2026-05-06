@@ -33,6 +33,8 @@ pub(crate) enum NormalizedEvent {
     SubagentStarted(SubagentEvent),
     SubagentEnded(SubagentEvent),
     LlmHint(LlmHintEvent),
+    LlmStarted(LlmEvent),
+    LlmEnded(LlmEvent),
     ToolStarted(ToolEvent),
     ToolEnded(ToolEvent),
     #[allow(dead_code)]
@@ -54,6 +56,7 @@ impl NormalizedEvent {
             | Self::Notification(event)
             | Self::HookMark(event) => &event.session_id,
             Self::LlmHint(event) => &event.session_id,
+            Self::LlmStarted(event) | Self::LlmEnded(event) => &event.session_id,
             Self::SubagentStarted(event) | Self::SubagentEnded(event) => &event.session_id,
             Self::ToolStarted(event) | Self::ToolEnded(event) => &event.session_id,
         }
@@ -92,6 +95,19 @@ pub(crate) struct LlmHintEvent {
     pub(crate) request_id: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) payload: Value,
+    pub(crate) metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LlmEvent {
+    pub(crate) session_id: String,
+    pub(crate) agent_kind: AgentKind,
+    pub(crate) event_name: String,
+    pub(crate) api_call_id: String,
+    pub(crate) provider: String,
+    pub(crate) model_name: Option<String>,
+    pub(crate) request: Value,
+    pub(crate) response: Value,
     pub(crate) metadata: Value,
 }
 

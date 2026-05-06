@@ -114,6 +114,8 @@ fn generates_hermes_shell_hook_config() {
     assert!(yaml["hooks"]["pre_llm_call"].is_array());
     assert!(yaml["hooks"]["post_llm_call"].is_array());
     assert!(yaml["hooks"]["subagent_start"].is_array());
+    assert!(yaml["hooks"]["pre_api_request"].is_array());
+    assert!(yaml["hooks"]["post_api_request"].is_array());
     assert!(yaml["hooks"]["subagent_stop"].is_array());
     assert!(
         yaml["hooks"]["pre_tool_call"][0]["command"]

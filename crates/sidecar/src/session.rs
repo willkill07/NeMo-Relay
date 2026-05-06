@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 use crate::config::{SessionConfig, SidecarConfig};
 use crate::error::SidecarError;
 use crate::model::{
-    AgentKind, LlmHintEvent, NormalizedEvent, SessionEvent, SubagentEvent, ToolEvent,
+    AgentKind, LlmEvent, LlmHintEvent, NormalizedEvent, SessionEvent, SubagentEvent, ToolEvent,
 };
 
 const LLM_HINT_TTL: Duration = Duration::from_secs(300);
@@ -69,6 +69,7 @@ struct Session {
     agent_scope: Option<ScopeHandle>,
     subagents: HashMap<String, ScopeHandle>,
     subagent_stack: Vec<String>,
+    llms: HashMap<String, LlmHandle>,
     tools: HashMap<String, ToolHandle>,
     pending_llm_hints: Vec<PendingLlmHint>,
     pending_tool_hints: Vec<PendingToolHint>,
@@ -154,6 +155,7 @@ impl SessionManager {
             if session.agent_scope.is_none()
                 && session.subagents.is_empty()
                 && session.subagent_stack.is_empty()
+                && session.llms.is_empty()
                 && session.tools.is_empty()
             {
                 sessions.remove(&session_id);
@@ -230,6 +232,7 @@ impl Session {
             agent_scope: None,
             subagents: HashMap::new(),
             subagent_stack: Vec::new(),
+            llms: HashMap::new(),
             tools: HashMap::new(),
             pending_llm_hints: Vec::new(),
             pending_tool_hints: Vec::new(),
@@ -252,6 +255,8 @@ impl Session {
                     NormalizedEvent::SubagentStarted(event) => self.start_subagent(event),
                     NormalizedEvent::SubagentEnded(event) => self.end_subagent(event),
                     NormalizedEvent::LlmHint(event) => self.add_llm_hint(event),
+                    NormalizedEvent::LlmStarted(event) => self.start_hook_llm(event),
+                    NormalizedEvent::LlmEnded(event) => self.end_hook_llm(event),
                     NormalizedEvent::ToolStarted(event) => self.start_tool(event),
                     NormalizedEvent::ToolEnded(event) => self.end_tool(event),
                     NormalizedEvent::PromptSubmitted(event) => self.mark("prompt_submitted", event),
@@ -391,16 +396,32 @@ impl Session {
         Ok(())
     }
 
-    // Closes the session in a fail-safe order: active tools first, nested subagents from the top
-    // down, correlation state, then the root agent scope. Observer flush/export happens after the
-    // root scope ends so terminal events are included.
+    // Closes the session in a fail-safe order: active LLMs/tools first, nested subagents from the
+    // top down, correlation state, then the root agent scope. Observer flush/export happens after
+    // the root scope ends so terminal events are included.
     fn end_agent(&mut self, event: SessionEvent) -> Result<(), SidecarError> {
         self.ensure_agent_started(event.metadata.clone())?;
+        self.close_active_llms_for_agent_end()?;
         self.close_active_tools_for_agent_end()?;
         self.close_active_subagents_for_agent_end()?;
         self.clear_correlation_state();
         self.close_agent_scope(event.payload)?;
         self.flush_observers()?;
+        Ok(())
+    }
+
+    // Ends all active hook-observed LLM calls before closing their containing scopes.
+    fn close_active_llms_for_agent_end(&mut self) -> Result<(), SidecarError> {
+        let active_llms: Vec<_> = self.llms.drain().map(|(_, handle)| handle).collect();
+        for handle in active_llms {
+            llm_call_end(
+                LlmCallEndParams::builder()
+                    .handle(&handle)
+                    .response(json!({ "status": "closed_by_agent_end" }))
+                    .metadata(json!({ "status": "closed_by_agent_end" }))
+                    .build(),
+            )?;
+        }
         Ok(())
     }
 
@@ -548,6 +569,56 @@ impl Session {
             hint: event,
             inserted_at: Instant::now(),
         });
+        Ok(())
+    }
+
+    // Starts an LLM call from hook activity such as Hermes API request hooks. Duplicate call IDs are
+    // ignored so repeated pre hooks do not create parallel handles for one provider call.
+    fn start_hook_llm(&mut self, event: LlmEvent) -> Result<(), SidecarError> {
+        self.ensure_agent_started(event.metadata.clone())?;
+        if self.llms.contains_key(&event.api_call_id) {
+            return Ok(());
+        }
+        let handle = llm_call(
+            LlmCallParams::builder()
+                .name(event.provider.as_str())
+                .request(&LlmRequest {
+                    headers: Map::new(),
+                    content: event.request,
+                })
+                .attributes(LlmAttributes::empty())
+                .metadata(event.metadata)
+                .model_name_opt(event.model_name)
+                .build(),
+        )?;
+        self.llms.insert(event.api_call_id, handle);
+        Ok(())
+    }
+
+    fn end_hook_llm(&mut self, event: LlmEvent) -> Result<(), SidecarError> {
+        self.ensure_agent_started(event.metadata.clone())?;
+        let handle = match self.llms.remove(&event.api_call_id) {
+            Some(handle) => handle,
+            None => llm_call(
+                LlmCallParams::builder()
+                    .name(event.provider.as_str())
+                    .request(&LlmRequest {
+                        headers: Map::new(),
+                        content: event.request,
+                    })
+                    .attributes(LlmAttributes::empty())
+                    .metadata(event.metadata.clone())
+                    .model_name_opt(event.model_name.clone())
+                    .build(),
+            )?,
+        };
+        llm_call_end(
+            LlmCallEndParams::builder()
+                .handle(&handle)
+                .response(event.response)
+                .metadata(event.metadata)
+                .build(),
+        )?;
         Ok(())
     }
 
@@ -1307,6 +1378,7 @@ fn event_agent_kind(event: &NormalizedEvent) -> AgentKind {
         NormalizedEvent::SubagentStarted(event) | NormalizedEvent::SubagentEnded(event) => {
             event.agent_kind
         }
+        NormalizedEvent::LlmStarted(event) | NormalizedEvent::LlmEnded(event) => event.agent_kind,
         NormalizedEvent::ToolStarted(event) | NormalizedEvent::ToolEnded(event) => event.agent_kind,
     }
 }
