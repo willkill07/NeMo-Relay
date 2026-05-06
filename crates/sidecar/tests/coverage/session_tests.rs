@@ -196,6 +196,134 @@ async fn handles_out_of_order_subagent_and_tool_end_events() {
 }
 
 #[tokio::test]
+async fn out_of_order_started_subagent_end_does_not_leak_scope() {
+    let config = SidecarConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+        anthropic_base_url: "http://127.0.0.1".into(),
+        atif_dir: None,
+        openinference_endpoint: None,
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let headers = HeaderMap::new();
+
+    manager
+        .apply_events(
+            &headers,
+            vec![
+                NormalizedEvent::AgentStarted(SessionEvent {
+                    session_id: "nested".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SessionStart".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::SubagentStarted(SubagentEvent {
+                    session_id: "nested".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SubagentStart".into(),
+                    subagent_id: "parent".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::SubagentStarted(SubagentEvent {
+                    session_id: "nested".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SubagentStart".into(),
+                    subagent_id: "child".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::SubagentEnded(SubagentEvent {
+                    session_id: "nested".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SubagentStop".into(),
+                    subagent_id: "parent".into(),
+                    payload: json!({ "out_of_order": true }),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::SubagentEnded(SubagentEvent {
+                    session_id: "nested".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SubagentStop".into(),
+                    subagent_id: "child".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::AgentEnded(SessionEvent {
+                    session_id: "nested".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SessionEnd".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert!(manager.inner.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn agent_end_closes_nested_active_subagents_lifo() {
+    let config = SidecarConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+        anthropic_base_url: "http://127.0.0.1".into(),
+        atif_dir: None,
+        openinference_endpoint: None,
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let headers = HeaderMap::new();
+
+    manager
+        .apply_events(
+            &headers,
+            vec![
+                NormalizedEvent::AgentStarted(SessionEvent {
+                    session_id: "cleanup".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SessionStart".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::SubagentStarted(SubagentEvent {
+                    session_id: "cleanup".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SubagentStart".into(),
+                    subagent_id: "parent".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::SubagentStarted(SubagentEvent {
+                    session_id: "cleanup".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SubagentStart".into(),
+                    subagent_id: "child".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::AgentEnded(SessionEvent {
+                    session_id: "cleanup".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SessionEnd".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert!(manager.inner.lock().await.is_empty());
+}
+
+#[tokio::test]
 async fn llm_lifecycle_starts_implicit_gateway_session() {
     let config = SidecarConfig {
         bind: "127.0.0.1:0".parse().unwrap(),

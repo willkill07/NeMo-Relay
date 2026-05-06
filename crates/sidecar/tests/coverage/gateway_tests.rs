@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::config::SidecarConfig;
+use crate::model::{AgentKind, NormalizedEvent, SessionEvent};
 use axum::http::{HeaderMap, HeaderValue};
 
 #[test]
@@ -116,6 +117,17 @@ fn observable_headers_omit_secrets_and_transport_headers() {
 }
 
 #[test]
+fn response_headers_preserve_duplicates() {
+    let mut headers = HeaderMap::new();
+    headers.append("set-cookie", HeaderValue::from_static("a=1"));
+    headers.append("set-cookie", HeaderValue::from_static("b=2"));
+
+    let copied = response_headers(&headers);
+
+    assert_eq!(copied.get_all("set-cookie").iter().count(), 2);
+}
+
+#[test]
 fn stream_response_records_preview_and_truncation() {
     assert_eq!(
         stream_response_json(b"data: done", false),
@@ -125,4 +137,59 @@ fn stream_response_records_preview_and_truncation() {
         stream_response_json(b"partial", true),
         json!({ "stream_preview": "partial", "stream_truncated": true })
     );
+}
+
+#[tokio::test]
+async fn streaming_llm_guard_closes_on_drop() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = SidecarConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://openai".into(),
+        anthropic_base_url: "http://anthropic".into(),
+        atif_dir: Some(temp.path().to_path_buf()),
+        openinference_endpoint: None,
+        metadata: None,
+        plugin_config: None,
+    };
+    let sessions = SessionManager::new(config);
+    let active = sessions
+        .start_llm(
+            &HeaderMap::new(),
+            LlmGatewayStart {
+                session_id: Some("drop-session".into()),
+                provider: "openai.responses".into(),
+                model_name: Some("gpt-test".into()),
+                request: LlmRequest {
+                    headers: Map::new(),
+                    content: json!({ "model": "gpt-test", "stream": true }),
+                },
+                streaming: true,
+                metadata: json!({ "gateway_path": "/v1/responses" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    drop(StreamingLlmGuard::new(
+        sessions.clone(),
+        active,
+        StatusCode::OK,
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    sessions
+        .apply_events(
+            &HeaderMap::new(),
+            vec![NormalizedEvent::AgentEnded(SessionEvent {
+                session_id: "drop-session".into(),
+                agent_kind: AgentKind::Gateway,
+                event_name: "SessionEnd".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+
+    let atif = std::fs::read_to_string(temp.path().join("drop-session.atif.json")).unwrap();
+    assert!(atif.contains("stream body dropped before completion"));
 }

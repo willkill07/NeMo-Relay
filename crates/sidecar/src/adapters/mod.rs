@@ -62,6 +62,8 @@ fn metadata(payload: &Value, headers: &HeaderMap, kind: AgentKind, event_name: &
         ("project_dir", string_at(payload, &["project_dir"])),
         ("user_email", string_at(payload, &["user_email"])),
         ("model", string_at(payload, &["model"])),
+        ("agent_id", string_at(payload, &["agent_id"])),
+        ("agent_type", string_at(payload, &["agent_type"])),
     ] {
         if let Some(value) = value {
             object.insert(key.into(), json!(value));
@@ -98,6 +100,7 @@ fn common_subagent_event(payload: &Value, headers: &HeaderMap, kind: AgentKind) 
 
 fn common_tool_event(payload: &Value, headers: &HeaderMap, kind: AgentKind) -> ToolEvent {
     let session = common_session_event(payload, headers, kind);
+    let normalized_event = normalize_name(&session.event_name);
     let tool_call_id = string_at(payload, &["tool_call_id"])
         .or_else(|| string_at(payload, &["toolCallId"]))
         .or_else(|| string_at(payload, &["tool_use_id"]))
@@ -121,8 +124,8 @@ fn common_tool_event(payload: &Value, headers: &HeaderMap, kind: AgentKind) -> T
         .or_else(|| value_at(payload, &["tool_response"]))
         .or_else(|| value_at(payload, &["output"]))
         .or_else(|| value_at(payload, &["result"]))
+        .or_else(|| event_detail_result(payload, &normalized_event))
         .unwrap_or(Value::Null);
-    let normalized_event = normalize_name(&session.event_name);
     ToolEvent {
         session_id: session.session_id,
         agent_kind: kind,
@@ -139,6 +142,11 @@ fn common_tool_event(payload: &Value, headers: &HeaderMap, kind: AgentKind) -> T
             .or_else(|| {
                 (normalized_event.contains("failure") || normalized_event.contains("failed"))
                     .then_some("error".to_string())
+            })
+            .or_else(|| {
+                normalized_event
+                    .contains("permissiondenied")
+                    .then_some("denied".to_string())
             }),
         payload: session.payload,
         metadata: session.metadata,
@@ -148,8 +156,26 @@ fn common_tool_event(payload: &Value, headers: &HeaderMap, kind: AgentKind) -> T
 fn subagent_id(payload: &Value) -> Option<String> {
     string_at(payload, &["subagent_id"])
         .or_else(|| string_at(payload, &["subagentId"]))
+        .or_else(|| string_at(payload, &["agent_id"]))
         .or_else(|| string_at(payload, &["subagent", "id"]))
         .or_else(|| string_at(payload, &["agent", "id"]))
+}
+
+fn event_detail_result(payload: &Value, normalized_event: &str) -> Option<Value> {
+    let include_details = normalized_event.contains("failure")
+        || normalized_event.contains("failed")
+        || normalized_event.contains("permissiondenied");
+    if !include_details {
+        return None;
+    }
+
+    let mut object = Map::new();
+    for key in ["error", "reason", "is_interrupt", "duration_ms"] {
+        if let Some(value) = value_at(payload, &[key]) {
+            object.insert(key.into(), value);
+        }
+    }
+    (!object.is_empty()).then_some(Value::Object(object))
 }
 
 fn string_at(payload: &Value, path: &[&str]) -> Option<String> {

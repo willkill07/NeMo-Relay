@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use crate::config::header_string;
 use crate::error::SidecarError;
 use crate::server::AppState;
-use crate::session::LlmGatewayStart;
+use crate::session::{ActiveLlm, LlmGatewayStart, SessionManager};
 
 pub(crate) async fn passthrough(
     State(state): State<AppState>,
@@ -94,11 +94,10 @@ pub(crate) async fn passthrough(
     let is_stream = streaming || content_type.contains("text/event-stream");
 
     if is_stream {
-        let sessions = state.sessions.clone();
         let stream = upstream_response.bytes_stream();
         let body = Body::from_stream(async_stream::stream! {
             let mut stream = stream;
-            let mut active = Some(active);
+            let mut llm = StreamingLlmGuard::new(state.sessions.clone(), active, status);
             let mut collected = Vec::new();
             let mut truncated = false;
             while let Some(chunk) = stream.next().await {
@@ -112,30 +111,14 @@ pub(crate) async fn passthrough(
                         yield Ok::<Bytes, reqwest::Error>(bytes);
                     }
                     Err(error) => {
-                        if let Some(active) = active.take() {
-                            let _ = sessions
-                                .end_llm(
-                                    active,
-                                    json!({ "error": error.to_string() }),
-                                    json!({ "http_status": status.as_u16(), "streaming": true, "gateway_error": true, "stage": "stream" }),
-                                )
-                                .await;
-                        }
+                        llm.end_error("stream", error.to_string()).await;
                         yield Err(error);
                         return;
                     }
                 }
             }
             let response = stream_response_json(&collected, truncated);
-            if let Some(active) = active.take() {
-                let _ = sessions
-                    .end_llm(
-                        active,
-                        response,
-                        json!({ "http_status": status.as_u16(), "streaming": true, "stream_truncated": truncated }),
-                    )
-                    .await;
-            }
+            llm.end_success(response, truncated).await;
         });
         return build_response(status, headers, body);
     }
@@ -165,6 +148,69 @@ pub(crate) async fn passthrough(
         )
         .await?;
     build_response(status, headers, Body::from(bytes))
+}
+
+struct StreamingLlmGuard {
+    sessions: SessionManager,
+    active: Option<ActiveLlm>,
+    status: StatusCode,
+}
+
+impl StreamingLlmGuard {
+    fn new(sessions: SessionManager, active: ActiveLlm, status: StatusCode) -> Self {
+        Self {
+            sessions,
+            active: Some(active),
+            status,
+        }
+    }
+
+    async fn end_success(&mut self, response: Value, truncated: bool) {
+        if let Some(active) = self.active.take() {
+            let _ = self
+                .sessions
+                .end_llm(
+                    active,
+                    response,
+                    json!({ "http_status": self.status.as_u16(), "streaming": true, "stream_truncated": truncated }),
+                )
+                .await;
+        }
+    }
+
+    async fn end_error(&mut self, stage: &'static str, error: String) {
+        if let Some(active) = self.active.take() {
+            let _ = self
+                .sessions
+                .end_llm(
+                    active,
+                    json!({ "error": error }),
+                    json!({ "http_status": self.status.as_u16(), "streaming": true, "gateway_error": true, "stage": stage }),
+                )
+                .await;
+        }
+    }
+}
+
+impl Drop for StreamingLlmGuard {
+    fn drop(&mut self) {
+        let Some(active) = self.active.take() else {
+            return;
+        };
+        let sessions = self.sessions.clone();
+        let status = self.status;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = sessions
+                    .end_llm(
+                        active,
+                        json!({ "error": "stream body dropped before completion" }),
+                        json!({ "http_status": status.as_u16(), "streaming": true, "gateway_error": true, "stage": "client_drop" }),
+                    )
+                    .await;
+            });
+        }
+    }
 }
 
 pub(crate) async fn models(
@@ -266,7 +312,7 @@ fn response_headers(headers: &HeaderMap) -> HeaderMap {
     let mut output = HeaderMap::new();
     for (name, value) in headers {
         if !is_hop_by_hop(name) {
-            output.insert(name.clone(), value.clone());
+            output.append(name.clone(), value.clone());
         }
     }
     output
@@ -278,10 +324,8 @@ fn build_response(
     body: Body,
 ) -> Result<Response<Body>, SidecarError> {
     let mut builder = Response::builder().status(status);
-    for (name, value) in headers {
-        if let Some(name) = name {
-            builder = builder.header(name, value);
-        }
+    for (name, value) in &headers {
+        builder = builder.header(name, value);
     }
     Ok(builder.body(body)?)
 }

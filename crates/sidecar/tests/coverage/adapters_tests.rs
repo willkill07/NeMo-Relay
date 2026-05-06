@@ -55,7 +55,9 @@ fn maps_claude_post_tool_failure_with_canonical_fields() {
             "tool_use_id": "toolu-1",
             "tool_name": "Bash",
             "tool_input": { "command": "false" },
-            "tool_response": { "stderr": "failed" }
+            "error": "failed",
+            "is_interrupt": false,
+            "duration_ms": 12
         }),
         &headers,
     );
@@ -64,8 +66,58 @@ fn maps_claude_post_tool_failure_with_canonical_fields() {
         NormalizedEvent::ToolEnded(event) => {
             assert_eq!(event.tool_call_id, "toolu-1");
             assert_eq!(event.tool_name, "Bash");
-            assert_eq!(event.result, json!({ "stderr": "failed" }));
+            assert_eq!(
+                event.result,
+                json!({ "error": "failed", "is_interrupt": false, "duration_ms": 12 })
+            );
             assert_eq!(event.status.as_deref(), Some("error"));
+        }
+        event => panic!("unexpected event: {event:?}"),
+    }
+}
+
+#[test]
+fn maps_claude_permission_denied_as_tool_end() {
+    let headers = HeaderMap::new();
+    let outcome = claude_code::adapt(
+        json!({
+            "session_id": "claude-session",
+            "hook_event_name": "PermissionDenied",
+            "tool_use_id": "toolu-denied",
+            "tool_name": "Bash",
+            "tool_input": { "command": "rm -rf /tmp/project" },
+            "reason": "policy"
+        }),
+        &headers,
+    );
+
+    match &outcome.events[0] {
+        NormalizedEvent::ToolEnded(event) => {
+            assert_eq!(event.tool_call_id, "toolu-denied");
+            assert_eq!(event.status.as_deref(), Some("denied"));
+            assert_eq!(event.result, json!({ "reason": "policy" }));
+        }
+        event => panic!("unexpected event: {event:?}"),
+    }
+}
+
+#[test]
+fn maps_claude_subagent_canonical_agent_id() {
+    let headers = HeaderMap::new();
+    let outcome = claude_code::adapt(
+        json!({
+            "session_id": "claude-session",
+            "hook_event_name": "SubagentStart",
+            "agent_id": "agent-worker-1",
+            "agent_type": "general-purpose"
+        }),
+        &headers,
+    );
+
+    match &outcome.events[0] {
+        NormalizedEvent::SubagentStarted(event) => {
+            assert_eq!(event.subagent_id, "agent-worker-1");
+            assert_eq!(event.metadata["agent_type"], json!("general-purpose"));
         }
         event => panic!("unexpected event: {event:?}"),
     }
@@ -214,8 +266,18 @@ fn stop_responses_preserve_vendor_shapes() {
         }),
         &headers,
     );
-    assert!(matches!(claude.events[0], NormalizedEvent::AgentEnded(_)));
+    assert!(matches!(claude.events[0], NormalizedEvent::HookMark(_)));
     assert_eq!(claude.response["stopReason"], Value::Null);
+
+    let codex = codex::adapt(
+        json!({
+            "session_id": "codex-session",
+            "hook_event_name": "stop"
+        }),
+        &headers,
+    );
+    assert!(matches!(codex.events[0], NormalizedEvent::HookMark(_)));
+    assert_eq!(codex.response, json!({}));
 
     let cursor = cursor::adapt(
         json!({

@@ -3,7 +3,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
@@ -43,6 +43,7 @@ const CURSOR_HOOK_EVENTS: &[&str] = &[
     "stop",
     "sessionEnd",
 ];
+const HOOK_FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 struct PlannedFile {
@@ -110,7 +111,9 @@ pub(crate) async fn hook_forward(command: HookForwardCommand) -> Result<(), Side
         sidecar_url.trim_end_matches('/'),
         command.agent.hook_path()
     );
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        .timeout(HOOK_FORWARD_TIMEOUT)
+        .build()?
         .post(url)
         .headers(sidecar_headers(
             command.atif_dir.as_deref(),

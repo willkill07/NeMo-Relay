@@ -14,7 +14,7 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
         &ClassificationRules {
             kind: AgentKind::Codex,
             agent_start: &["sessionStart", "session_start", "agentStarted"],
-            agent_end: &["sessionEnd", "session_end", "agentEnded", "stop"],
+            agent_end: &["sessionEnd", "session_end", "agentEnded"],
             subagent_start: &["subagentStart", "subagent_start"],
             subagent_end: &["subagentStop", "subagentEnd", "subagent_stop"],
             tool_start: &["preToolUse", "toolStarted", "tool_start"],

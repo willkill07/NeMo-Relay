@@ -75,9 +75,19 @@ nemo-flow-sidecar install claude-code \
   --target cli \
   --sidecar-url http://127.0.0.1:4040 \
   --atif-dir .nemo-flow/atif
+```
 
-export ANTHROPIC_BASE_URL=http://127.0.0.1:4040
+Start the sidecar in one terminal:
+
+```bash
 NEMO_FLOW_ATIF_DIR=.nemo-flow/atif nemo-flow-sidecar --bind 127.0.0.1:4040
+```
+
+Launch Claude Code from another terminal with the gateway environment:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:4040
+claude
 ```
 
 ## Verify

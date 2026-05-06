@@ -55,6 +55,7 @@ struct Session {
     scope_stack: ScopeStackHandle,
     agent_scope: Option<ScopeHandle>,
     subagents: HashMap<String, ScopeHandle>,
+    subagent_stack: Vec<String>,
     tools: HashMap<String, ToolHandle>,
     config: SessionConfig,
     atif: Option<AtifExporter>,
@@ -84,6 +85,7 @@ impl SessionManager {
             session.apply(event).await?;
             if session.agent_scope.is_none()
                 && session.subagents.is_empty()
+                && session.subagent_stack.is_empty()
                 && session.tools.is_empty()
             {
                 sessions.remove(&session_id);
@@ -139,6 +141,7 @@ impl Session {
             scope_stack: create_scope_stack(),
             agent_scope: None,
             subagents: HashMap::new(),
+            subagent_stack: Vec::new(),
             tools: HashMap::new(),
             config,
             atif: None,
@@ -269,15 +272,17 @@ impl Session {
                     .build(),
             )?;
         }
-        let active_subagents: Vec<_> = self.subagents.drain().map(|(_, handle)| handle).collect();
-        for handle in active_subagents.into_iter().rev() {
-            let _ = pop_scope(
-                PopScopeParams::builder()
-                    .handle_uuid(&handle.uuid)
-                    .output(json!({ "status": "closed_by_agent_end" }))
-                    .build(),
-            );
+        while let Some(subagent_id) = self.subagent_stack.pop() {
+            if let Some(handle) = self.subagents.remove(&subagent_id) {
+                pop_scope(
+                    PopScopeParams::builder()
+                        .handle_uuid(&handle.uuid)
+                        .output(json!({ "status": "closed_by_agent_end" }))
+                        .build(),
+                )?;
+            }
         }
+        self.subagents.clear();
         if let Some(scope) = self.agent_scope.take() {
             pop_scope(
                 PopScopeParams::builder()
@@ -303,13 +308,14 @@ impl Session {
                 .input(event.payload)
                 .build(),
         )?;
+        self.subagent_stack.push(event.subagent_id.clone());
         self.subagents.insert(event.subagent_id, scope);
         Ok(())
     }
 
     fn end_subagent(&mut self, event: SubagentEvent) -> Result<(), SidecarError> {
         self.ensure_agent_started(event.metadata.clone())?;
-        let Some(scope) = self.subagents.remove(&event.subagent_id) else {
+        let Some(scope) = self.subagents.get(&event.subagent_id).cloned() else {
             return self.mark(
                 "subagent_end_without_start",
                 SessionEvent {
@@ -321,6 +327,16 @@ impl Session {
                 },
             );
         };
+        if self.subagent_stack.last() != Some(&event.subagent_id) {
+            return emit_mark_event(
+                EmitMarkEventParams::builder()
+                    .name("subagent_end_not_top")
+                    .data(event.payload)
+                    .metadata(event.metadata)
+                    .build(),
+            )
+            .map_err(SidecarError::from);
+        }
         if pop_scope(
             PopScopeParams::builder()
                 .handle_uuid(&scope.uuid)
@@ -329,14 +345,17 @@ impl Session {
         )
         .is_err()
         {
-            emit_mark_event(
+            return emit_mark_event(
                 EmitMarkEventParams::builder()
                     .name("subagent_end_not_top")
                     .data(event.payload)
                     .metadata(event.metadata)
                     .build(),
-            )?;
+            )
+            .map_err(SidecarError::from);
         }
+        self.subagent_stack.pop();
+        self.subagents.remove(&event.subagent_id);
         Ok(())
     }
 

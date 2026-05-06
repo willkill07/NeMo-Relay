@@ -190,6 +190,43 @@ fn cursor_patch_restore_restores_original_file() {
 }
 
 #[test]
+fn cursor_patch_restore_uses_nearest_project_cursor_dir() {
+    let _guard = current_dir_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let previous = std::env::current_dir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".cursor")).unwrap();
+    std::fs::create_dir_all(temp.path().join("nested")).unwrap();
+    std::fs::write(
+        temp.path().join(".cursor/hooks.json"),
+        r#"{"hooks":{"sessionStart":[]}}"#,
+    )
+    .unwrap();
+    std::env::set_current_dir(temp.path().join("nested")).unwrap();
+    let resolved = ResolvedConfig {
+        sidecar: SidecarConfig::default(),
+        agents: AgentConfigs::default(),
+    };
+
+    let prepared = PreparedRun::new(
+        CodingAgent::Cursor,
+        vec!["cursor-agent".into()],
+        "http://s",
+        &resolved,
+        false,
+    )
+    .unwrap();
+
+    assert!(
+        std::fs::read_to_string(temp.path().join(".cursor/hooks.json"))
+            .unwrap()
+            .contains("hook-forward cursor")
+    );
+    assert!(!Path::new(".cursor/hooks.json").exists());
+    prepared.restore().unwrap();
+    std::env::set_current_dir(previous).unwrap();
+}
+
+#[test]
 fn cursor_patch_restore_removes_temporary_file() {
     let _guard = current_dir_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();

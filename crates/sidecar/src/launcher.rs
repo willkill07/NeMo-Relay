@@ -228,7 +228,7 @@ impl PreparedRun {
     }
 
     fn prepare_cursor(&mut self) -> Result<(), SidecarError> {
-        let path = std::env::current_dir()?.join(".cursor/hooks.json");
+        let path = cursor_hooks_path()?;
         let had_original = path.exists();
         let backup_path = if had_original {
             let backup = path.with_extension(format!("json.nemo-flow-run.bak.{}", timestamp()?));
@@ -258,7 +258,7 @@ impl PreparedRun {
     }
 
     fn prepare_cursor_dry(&mut self) -> Result<(), SidecarError> {
-        let path = std::env::current_dir()?.join(".cursor/hooks.json");
+        let path = cursor_hooks_path()?;
         self.notes.push(format!(
             "would temporarily merge NeMo Flow hooks into {}",
             path.display()
@@ -400,6 +400,15 @@ fn temp_dir(prefix: &str) -> Result<PathBuf, SidecarError> {
     let path = std::env::temp_dir().join(format!("{prefix}-{}", timestamp()?));
     std::fs::create_dir_all(&path)?;
     Ok(path)
+}
+
+fn cursor_hooks_path() -> Result<PathBuf, SidecarError> {
+    let cwd = std::env::current_dir()?;
+    let project = cwd
+        .ancestors()
+        .find(|ancestor| ancestor.join(".cursor").is_dir())
+        .unwrap_or(cwd.as_path());
+    Ok(project.join(".cursor/hooks.json"))
 }
 
 fn timestamp() -> Result<u128, SidecarError> {

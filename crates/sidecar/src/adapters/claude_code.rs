@@ -4,7 +4,7 @@
 use axum::http::HeaderMap;
 use serde_json::{Value, json};
 
-use crate::adapters::{AdapterOutcome, ClassificationRules, classify};
+use crate::adapters::{AdapterOutcome, ClassificationRules, classify, event_name, normalize_name};
 use crate::model::{AgentKind, NormalizedEvent};
 
 pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
@@ -14,7 +14,7 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
         &ClassificationRules {
             kind: AgentKind::ClaudeCode,
             agent_start: &["SessionStart", "sessionStart", "session_start"],
-            agent_end: &["SessionEnd", "sessionEnd", "session_end", "Stop", "stop"],
+            agent_end: &["SessionEnd", "sessionEnd", "session_end"],
             subagent_start: &["SubagentStart", "subagentStart"],
             subagent_end: &["SubagentStop", "subagentStop", "SubagentEnd"],
             tool_start: &["PreToolUse", "preToolUse"],
@@ -25,9 +25,12 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
                 "postToolUseFailure",
                 "ToolUseFailed",
                 "toolUseFailed",
+                "PermissionDenied",
+                "permissionDenied",
             ],
         },
     );
+    let normalized_event = normalize_name(&event_name(&payload));
     let response = match &event {
         NormalizedEvent::ToolStarted(_) => json!({
             "continue": true,
@@ -36,7 +39,12 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
                 "permissionDecision": "allow"
             }
         }),
-        NormalizedEvent::AgentEnded(_) => json!({ "continue": true, "stopReason": null }),
+        NormalizedEvent::AgentEnded(_) | NormalizedEvent::HookMark(_)
+            if normalized_event == "stop" =>
+        {
+            json!({ "continue": true, "stopReason": null })
+        }
+        NormalizedEvent::AgentEnded(_) => json!({ "continue": true }),
         _ => json!({ "continue": true }),
     };
     AdapterOutcome {

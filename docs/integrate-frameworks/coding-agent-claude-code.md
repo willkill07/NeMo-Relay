@@ -73,12 +73,17 @@ nemo-flow-sidecar install claude-code \
   --atif-dir .nemo-flow/atif
 ```
 
-Then set `ANTHROPIC_BASE_URL` in the Claude Code process environment and start the
-sidecar manually in another terminal:
+Then start the sidecar manually:
+
+```bash
+NEMO_FLOW_ATIF_DIR=.nemo-flow/atif nemo-flow-sidecar --bind 127.0.0.1:4040
+```
+
+Launch Claude Code from another terminal with the gateway environment:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:4040
-NEMO_FLOW_ATIF_DIR=.nemo-flow/atif nemo-flow-sidecar --bind 127.0.0.1:4040
+claude
 ```
 
 The sidecar forwards Anthropic `/v1/messages`, `/v1/messages/count_tokens`, and
