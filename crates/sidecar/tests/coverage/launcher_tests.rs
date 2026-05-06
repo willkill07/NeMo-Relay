@@ -484,17 +484,8 @@ fn cursor_dry_run_does_not_write_hooks() {
 #[tokio::test]
 async fn run_starts_sidecar_injects_env_and_returns_agent_exit_code() {
     let temp = tempfile::tempdir().unwrap();
-    let script = temp.path().join("fake-agent.sh");
     let output = temp.path().join("env.txt");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\nprintf '%s' \"$NEMO_FLOW_SIDECAR_URL\" > {}\nexit 7\n",
-            output.display()
-        ),
-    )
-    .unwrap();
-    make_executable(&script);
+    let command_argv = fake_agent_command(temp.path(), &output);
     let command = RunCommand {
         agent: Some(CodingAgent::Codex),
         config: None,
@@ -506,7 +497,7 @@ async fn run_starts_sidecar_injects_env_and_returns_agent_exit_code() {
         plugin_config: None,
         dry_run: false,
         print: false,
-        command: vec![script.display().to_string()],
+        command: command_argv,
     };
 
     let code = run(command, None).await.unwrap();
@@ -515,6 +506,35 @@ async fn run_starts_sidecar_injects_env_and_returns_agent_exit_code() {
     let url = std::fs::read_to_string(output).unwrap();
     assert!(url.starts_with("http://127.0.0.1:"));
     assert!(!url.ends_with(":0"));
+}
+
+#[cfg(unix)]
+fn fake_agent_command(temp: &Path, output: &Path) -> Vec<String> {
+    let script = temp.join("fake-agent.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$NEMO_FLOW_SIDECAR_URL\" > \"{}\"\nexit 7\n",
+            output.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&script);
+    vec![script.display().to_string()]
+}
+
+#[cfg(windows)]
+fn fake_agent_command(temp: &Path, output: &Path) -> Vec<String> {
+    let script = temp.join("fake-agent.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n<nul set /p dummy=%NEMO_FLOW_SIDECAR_URL% > \"{}\"\r\nexit /b 7\r\n",
+            output.display()
+        ),
+    )
+    .unwrap();
+    vec!["cmd.exe".into(), "/C".into(), script.display().to_string()]
 }
 
 #[tokio::test]

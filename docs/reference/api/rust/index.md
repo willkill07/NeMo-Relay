@@ -61,7 +61,6 @@ Use the generated crate entry points when you need symbol-level detail:
 
 nemo-flow <_generated/nemo-flow/src>
 nemo-flow-adaptive <_generated/nemo-flow-adaptive/src>
-nemo-flow-adaptive <_generated/nemo-flow-sidecar/src>
 ```
 
 ## Related Guides
