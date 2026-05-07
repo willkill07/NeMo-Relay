@@ -31,6 +31,8 @@ environment variables, or shared TOML config.
 - Hermes does not require a static bundle in this directory. Use
   `nemo-flow-sidecar install hermes` to merge hook commands into
   `.hermes/config.yaml`.
+- `hermes/` contains a native Hermes Python plugin prototype that writes ATIF
+  from Hermes plugin middleware without running the sidecar HTTP process.
 
 ## Transparent Setup
 
