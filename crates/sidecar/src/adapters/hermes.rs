@@ -10,6 +10,11 @@ use crate::adapters::{
 };
 use crate::model::{AgentKind, LlmEvent};
 
+/// Normalizes Hermes shell hook payloads without emitting control directives.
+///
+/// Hermes hooks are installed as shell commands and may run outside `run`, so this adapter keeps
+/// responses minimal and relies on the forwarder fail-open/fail-closed setting to decide whether
+/// hook delivery problems affect the invoking agent.
 pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
     let event_name = event_name(&payload);
     let normalized = normalize_name(&event_name);

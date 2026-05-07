@@ -118,6 +118,39 @@ fn inference_failure_has_actionable_message() {
 }
 
 #[test]
+fn missing_configured_command_has_actionable_messages() {
+    let command = RunCommand {
+        agent: None,
+        config: None,
+        openai_base_url: None,
+        anthropic_base_url: None,
+        atif_dir: None,
+        openinference_endpoint: None,
+        session_metadata: None,
+        plugin_config: None,
+        dry_run: false,
+        print: false,
+        command: vec![],
+    };
+
+    let error = resolve_agent_and_argv(&command, &AgentConfigs::default())
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("missing command"));
+
+    let command = RunCommand {
+        agent: Some(CodingAgent::Cursor),
+        ..command
+    };
+    let error = resolve_agent_and_argv(&command, &AgentConfigs::default())
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("no configured command for cursor"));
+}
+
+#[test]
 fn prepares_codex_config_overrides() {
     let resolved = ResolvedConfig {
         sidecar: SidecarConfig::default(),
@@ -145,6 +178,62 @@ fn prepares_codex_config_overrides() {
             .iter()
             .any(|arg| arg.contains("hooks.SessionStart"))
     );
+}
+
+#[test]
+fn prepares_claude_dry_run_without_writing_plugin() {
+    let resolved = ResolvedConfig {
+        sidecar: SidecarConfig::default(),
+        agents: AgentConfigs::default(),
+    };
+    let prepared = PreparedRun::new(
+        CodingAgent::ClaudeCode,
+        vec!["claude".into()],
+        "http://127.0.0.1:1234",
+        &resolved,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(prepared.argv[1], "--plugin-dir");
+    assert_eq!(prepared.argv[2], "<temporary-claude-plugin-dir>");
+    assert!(
+        prepared
+            .env
+            .contains(&("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:1234".into()))
+    );
+    assert!(prepared.notes[0].contains("would generate"));
+}
+
+#[test]
+fn cursor_patching_can_be_disabled() {
+    let _guard = current_dir_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let previous = std::env::current_dir().unwrap();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let resolved = ResolvedConfig {
+        sidecar: SidecarConfig::default(),
+        agents: AgentConfigs {
+            cursor: CursorAgentConfig {
+                command: None,
+                patch_restore_hooks: false,
+            },
+            ..AgentConfigs::default()
+        },
+    };
+
+    let prepared = PreparedRun::new(
+        CodingAgent::Cursor,
+        vec!["cursor-agent".into()],
+        "http://s",
+        &resolved,
+        false,
+    )
+    .unwrap();
+
+    assert!(prepared.cursor_restore.is_none());
+    assert!(!Path::new(".cursor/hooks.json").exists());
+    std::env::set_current_dir(previous).unwrap();
 }
 
 #[test]
@@ -309,6 +398,65 @@ fn cursor_patch_restore_removes_temporary_file() {
 }
 
 #[test]
+fn cursor_restore_reports_failed_backup_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let prepared = PreparedRun {
+        argv: vec![],
+        env: vec![],
+        temp_dirs: vec![],
+        cursor_restore: Some(CursorRestore {
+            path: temp.path().join("hooks.json"),
+            backup_path: Some(temp.path().join("missing-backup.json")),
+            had_original: true,
+        }),
+        notes: vec![],
+    };
+
+    let error = prepared.restore().unwrap_err().to_string();
+
+    assert!(error.contains("failed to restore Cursor hooks"));
+}
+
+#[test]
+fn cursor_restore_reports_failed_temporary_hook_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let hooks_path = temp.path().join("hooks.json");
+    std::fs::create_dir(&hooks_path).unwrap();
+    let prepared = PreparedRun {
+        argv: vec![],
+        env: vec![],
+        temp_dirs: vec![],
+        cursor_restore: Some(CursorRestore {
+            path: hooks_path,
+            backup_path: None,
+            had_original: false,
+        }),
+        notes: vec![],
+    };
+
+    let error = prepared.restore().unwrap_err().to_string();
+
+    assert!(error.contains("failed to remove temporary Cursor hooks"));
+}
+
+#[test]
+fn cursor_restore_noops_when_original_was_declared_without_backup() {
+    let prepared = PreparedRun {
+        argv: vec![],
+        env: vec![],
+        temp_dirs: vec![],
+        cursor_restore: Some(CursorRestore {
+            path: PathBuf::from("unused"),
+            backup_path: None,
+            had_original: true,
+        }),
+        notes: vec![],
+    };
+
+    prepared.restore().unwrap();
+}
+
+#[test]
 fn cursor_dry_run_does_not_write_hooks() {
     let _guard = current_dir_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -336,17 +484,8 @@ fn cursor_dry_run_does_not_write_hooks() {
 #[tokio::test]
 async fn run_starts_sidecar_injects_env_and_returns_agent_exit_code() {
     let temp = tempfile::tempdir().unwrap();
-    let script = temp.path().join("fake-agent.sh");
     let output = temp.path().join("env.txt");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\nprintf '%s' \"$NEMO_FLOW_SIDECAR_URL\" > {}\nexit 7\n",
-            output.display()
-        ),
-    )
-    .unwrap();
-    make_executable(&script);
+    let command_argv = fake_agent_command(temp.path(), &output);
     let command = RunCommand {
         agent: Some(CodingAgent::Codex),
         config: None,
@@ -358,7 +497,7 @@ async fn run_starts_sidecar_injects_env_and_returns_agent_exit_code() {
         plugin_config: None,
         dry_run: false,
         print: false,
-        command: vec![script.display().to_string()],
+        command: command_argv,
     };
 
     let code = run(command, None).await.unwrap();
@@ -367,6 +506,35 @@ async fn run_starts_sidecar_injects_env_and_returns_agent_exit_code() {
     let url = std::fs::read_to_string(output).unwrap();
     assert!(url.starts_with("http://127.0.0.1:"));
     assert!(!url.ends_with(":0"));
+}
+
+#[cfg(unix)]
+fn fake_agent_command(temp: &Path, output: &Path) -> Vec<String> {
+    let script = temp.join("fake-agent.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$NEMO_FLOW_SIDECAR_URL\" > \"{}\"\nexit 7\n",
+            output.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&script);
+    vec![script.display().to_string()]
+}
+
+#[cfg(windows)]
+fn fake_agent_command(temp: &Path, output: &Path) -> Vec<String> {
+    let script = temp.join("fake-agent.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n<nul set /p dummy=%NEMO_FLOW_SIDECAR_URL% > \"{}\"\r\nexit /b 7\r\n",
+            output.display()
+        ),
+    )
+    .unwrap();
+    vec!["cmd.exe".into(), "/C".into(), script.display().to_string()]
 }
 
 #[tokio::test]
@@ -390,6 +558,16 @@ async fn dry_run_does_not_spawn_agent() {
     assert_eq!(code, ExitCode::SUCCESS);
 }
 
+#[tokio::test]
+async fn wait_for_health_reports_unready_sidecar() {
+    let error = wait_for_health("http://127.0.0.1:1")
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("sidecar did not become ready"));
+}
+
 #[cfg(unix)]
 fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -397,6 +575,3 @@ fn make_executable(path: &Path) {
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions).unwrap();
 }
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) {}
