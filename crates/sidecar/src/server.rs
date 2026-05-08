@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::time::Duration;
+
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
@@ -15,6 +17,10 @@ use crate::config::SidecarConfig;
 use crate::error::SidecarError;
 use crate::gateway;
 use crate::session::SessionManager;
+
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -63,9 +69,15 @@ pub(crate) async fn serve_listener(
 /// proxy model traffic and emit LLM runtime events against the same `SessionManager`.
 pub(crate) fn router(config: SidecarConfig) -> Router {
     let sessions = SessionManager::new(config.clone());
+    let http = Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(HTTP_REQUEST_TIMEOUT)
+        .read_timeout(HTTP_READ_TIMEOUT)
+        .build()
+        .expect("sidecar HTTP client configuration is valid");
     let state = AppState {
         config,
-        http: Client::new(),
+        http,
         sessions,
     };
     Router::new()

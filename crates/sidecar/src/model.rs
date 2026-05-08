@@ -61,6 +61,13 @@ impl NormalizedEvent {
             Self::ToolStarted(event) | Self::ToolEnded(event) => &event.session_id,
         }
     }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::AgentEnded(_) | Self::SubagentEnded(_) | Self::LlmEnded(_) | Self::ToolEnded(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

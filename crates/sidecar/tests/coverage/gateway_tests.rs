@@ -11,6 +11,42 @@ use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use reqwest::Client;
 
+async fn wait_for_file_contains(
+    path: &std::path::Path,
+    needle: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && contents.contains(needle)
+        {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_session_llms_empty(
+    sessions: &SessionManager,
+    session_id: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if sessions.session_llms_empty(session_id).await {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 #[test]
 fn removes_hop_by_hop_headers() {
     assert!(!should_forward_request_header(&HeaderName::from_static(
@@ -306,7 +342,11 @@ async fn streaming_llm_guard_closes_on_drop() {
         active,
         StatusCode::OK,
     ));
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Drop cleanup runs in a spawned task, so poll the session state instead of sleeping.
+    assert!(
+        wait_for_session_llms_empty(&sessions, "drop-session", std::time::Duration::from_secs(5))
+            .await
+    );
     sessions
         .apply_events(
             &HeaderMap::new(),
@@ -321,6 +361,13 @@ async fn streaming_llm_guard_closes_on_drop() {
         .await
         .unwrap();
 
-    let atif = std::fs::read_to_string(temp.path().join("drop-session.atif.json")).unwrap();
-    assert!(atif.contains("stream body dropped before completion"));
+    let atif_path = temp.path().join("drop-session.atif.json");
+    assert!(
+        wait_for_file_contains(
+            &atif_path,
+            "stream body dropped before completion",
+            std::time::Duration::from_secs(5),
+        )
+        .await
+    );
 }

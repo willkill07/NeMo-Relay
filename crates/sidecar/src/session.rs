@@ -147,6 +147,9 @@ impl SessionManager {
         let mut sessions = self.inner.lock().await;
         for event in events {
             let session_id = event.session_id().to_string();
+            if event.is_terminal() && !sessions.contains_key(&session_id) {
+                continue;
+            }
             let config = self.default_config.session_config_from_headers(headers);
             let session = sessions.entry(session_id.clone()).or_insert_with(|| {
                 Session::new(session_id.clone(), event_agent_kind(&event), config.clone())
@@ -199,7 +202,17 @@ impl SessionManager {
     ) -> Result<(), SidecarError> {
         let response_for_hints = response.clone();
         let session_id = active.session_id.clone();
+        let llm_id = active.handle.uuid.to_string();
         let owner_subagent_id = active.owner_subagent_id.clone();
+        {
+            let mut sessions = self.inner.lock().await;
+            let Some(session) = sessions.get_mut(&session_id) else {
+                return Ok(());
+            };
+            if session.llms.remove(&llm_id).is_none() {
+                return Ok(());
+            }
+        }
         TASK_SCOPE_STACK
             .scope(active.stack, async move {
                 llm_call_end(
@@ -217,6 +230,16 @@ impl SessionManager {
             session.add_tool_hints_from_llm_response(response_for_hints, owner_subagent_id);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn session_llms_empty(&self, session_id: &str) -> bool {
+        self.inner
+            .lock()
+            .await
+            .get(session_id)
+            .map(|session| session.llms.is_empty())
+            .unwrap_or(true)
     }
 }
 
@@ -298,12 +321,15 @@ impl Session {
                         .model_name_opt(start.model_name)
                         .build(),
                 )?;
-                Ok(ActiveLlm {
+                let active = ActiveLlm {
                     stack,
                     handle,
                     session_id: self.session_id.clone(),
                     owner_subagent_id: owner.subagent_id,
-                })
+                };
+                self.llms
+                    .insert(active.handle.uuid.to_string(), active.handle.clone());
+                Ok(active)
             })
             .await
     }
@@ -1053,11 +1079,27 @@ fn write_atif(
     exporter: &AtifExporter,
 ) -> Result<(), SidecarError> {
     std::fs::create_dir_all(directory)?;
+    validate_atif_session_id(session_id)?;
     let path = directory.join(format!("{session_id}.atif.json"));
     let trajectory = exporter.export();
     let serialized = serde_json::to_vec_pretty(&trajectory)
         .map_err(|error| SidecarError::InvalidPayload(error.to_string()))?;
     std::fs::write(path, serialized)?;
+    Ok(())
+}
+
+fn validate_atif_session_id(session_id: &str) -> Result<(), SidecarError> {
+    if session_id.is_empty()
+        || session_id == "."
+        || session_id == ".."
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(SidecarError::InvalidPayload(
+            "session id is not safe for ATIF export filename".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1148,6 +1190,9 @@ fn collect_openai_response_tool_hints(
         return;
     };
     for item in output {
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            continue;
+        }
         push_tool_hint(
             hints,
             item,

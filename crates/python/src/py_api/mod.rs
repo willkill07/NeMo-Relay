@@ -642,13 +642,7 @@ fn llm_call_end(
     let data = opt_py_to_json(data)?;
     let metadata = opt_py_to_json(metadata)?;
     let response_codec = py_llm_response_codec(response_codec);
-    let annotated_response = match py_annotated_llm_response(annotated_response)? {
-        Some(annotated_response) => Some(annotated_response),
-        None => response_codec
-            .as_ref()
-            .and_then(|codec| codec.decode_response(&response_json).ok())
-            .map(Arc::new),
-    };
+    let annotated_response = py_annotated_llm_response(annotated_response)?;
     let timestamp = opt_py_to_timestamp(timestamp)?;
     core_llm_api::llm_call_end(
         core_llm_api::LlmCallEndParams::builder()
@@ -657,6 +651,7 @@ fn llm_call_end(
             .data_opt(data)
             .metadata_opt(metadata)
             .annotated_response_opt(annotated_response)
+            .response_codec_opt(response_codec)
             .timestamp_opt(timestamp)
             .build(),
     )

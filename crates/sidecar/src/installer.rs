@@ -288,12 +288,11 @@ fn planned_codex_files(
 ) -> Result<Vec<PlannedFile>, SidecarError> {
     let config_path = base.join(".codex/config.toml");
     let hooks_path = base.join(".codex/hooks.json");
+    let existing_config = read_optional_text_file(&config_path)?;
     Ok(vec![
         PlannedFile {
             path: config_path.clone(),
-            contents: merge_codex_config(
-                &std::fs::read_to_string(&config_path).unwrap_or_default(),
-            )?,
+            contents: merge_codex_config(&existing_config)?,
         },
         planned_json_hooks_file(
             hooks_path,

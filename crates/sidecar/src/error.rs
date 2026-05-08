@@ -33,7 +33,8 @@ impl IntoResponse for SidecarError {
     // upstream gateway failures are bad gateway responses, and local install/config/runtime faults
     // remain internal errors so callers do not mistake them for agent policy decisions.
     fn into_response(self) -> Response {
-        let status = match self {
+        let message = self.to_string();
+        let status = match &self {
             Self::InvalidPayload(_) => StatusCode::BAD_REQUEST,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::Http(_)
@@ -46,7 +47,7 @@ impl IntoResponse for SidecarError {
         };
         let body = Json(json!({
             "error": {
-                "message": self.to_string(),
+                "message": message,
                 "type": "nemo_flow_sidecar_error"
             }
         }));

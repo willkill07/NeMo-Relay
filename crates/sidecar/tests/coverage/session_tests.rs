@@ -276,6 +276,31 @@ async fn handles_out_of_order_subagent_and_tool_end_events() {
 }
 
 #[tokio::test]
+async fn terminal_retry_for_unknown_session_is_ignored() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = session_test_config();
+    config.atif_dir = Some(temp.path().to_path_buf());
+    let manager = SessionManager::new(config);
+
+    manager
+        .apply_events(
+            &HeaderMap::new(),
+            vec![NormalizedEvent::AgentEnded(SessionEvent {
+                session_id: "retry-session".into(),
+                agent_kind: AgentKind::Codex,
+                event_name: "sessionEnd".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+
+    assert!(manager.inner.lock().await.is_empty());
+    assert!(!temp.path().join("retry-session.atif.json").exists());
+}
+
+#[tokio::test]
 async fn out_of_order_started_subagent_end_does_not_leak_scope() {
     let config = SidecarConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -447,6 +472,53 @@ async fn llm_lifecycle_starts_implicit_gateway_session() {
 
     let sessions = manager.inner.lock().await;
     assert!(sessions.contains_key("llm-session"));
+}
+
+#[tokio::test]
+async fn agent_end_closes_in_flight_gateway_llm() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = session_test_config();
+    config.atif_dir = Some(temp.path().to_path_buf());
+    let manager = SessionManager::new(config);
+    let _active = manager
+        .start_llm(
+            &HeaderMap::new(),
+            LlmGatewayStart {
+                session_id: Some("gateway-cleanup".into()),
+                provider: "openai.responses".into(),
+                model_name: Some("gpt-test".into()),
+                subagent_id: None,
+                conversation_id: None,
+                generation_id: None,
+                request_id: None,
+                request: LlmRequest {
+                    headers: Map::new(),
+                    content: json!({ "model": "gpt-test", "input": "hello" }),
+                },
+                streaming: true,
+                metadata: json!({ "gateway_path": "/v1/responses" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    manager
+        .apply_events(
+            &HeaderMap::new(),
+            vec![NormalizedEvent::AgentEnded(SessionEvent {
+                session_id: "gateway-cleanup".into(),
+                agent_kind: AgentKind::Gateway,
+                event_name: "SessionEnd".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+
+    assert!(manager.inner.lock().await.is_empty());
+    let atif = std::fs::read_to_string(temp.path().join("gateway-cleanup.atif.json")).unwrap();
+    assert!(atif.contains("closed_by_agent_end"));
 }
 
 #[tokio::test]
@@ -1217,6 +1289,55 @@ async fn llm_response_tool_hint_claims_next_tool_hook() {
         handle.metadata.as_ref().unwrap()["tool_correlation_subagent_id"],
         json!("worker")
     );
+}
+
+#[test]
+fn openai_response_tool_hints_ignore_non_tool_output_items() {
+    let mut hints = Vec::new();
+
+    collect_openai_response_tool_hints(
+        &json!({
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg-1",
+                    "name": "Read",
+                    "arguments": "{\"file_path\":\"README.md\"}"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "Read",
+                    "arguments": "{\"file_path\":\"README.md\"}"
+                }
+            ]
+        }),
+        Some("worker"),
+        &mut hints,
+    );
+
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].tool_call_id.as_deref(), Some("call-1"));
+}
+
+#[test]
+fn write_atif_rejects_unsafe_session_id_filename() {
+    let temp = tempfile::tempdir().unwrap();
+    let exporter = AtifExporter::new(
+        "safe-session".to_string(),
+        AtifAgentInfo {
+            name: "test-agent".to_string(),
+            version: "1.0.0".to_string(),
+            model_name: None,
+            tool_definitions: None,
+            extra: None,
+        },
+    );
+
+    let error = write_atif(&temp.path().to_path_buf(), "../escape", &exporter).unwrap_err();
+
+    assert!(matches!(error, SidecarError::InvalidPayload(_)));
+    assert!(!temp.path().join("../escape.atif.json").exists());
 }
 
 #[tokio::test]

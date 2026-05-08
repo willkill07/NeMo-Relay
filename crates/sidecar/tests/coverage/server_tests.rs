@@ -9,10 +9,28 @@ use futures_util::stream;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tower::ServiceExt;
 
 use super::*;
 use crate::error::SidecarError;
+
+struct TestServer {
+    url: String,
+    handle: JoinHandle<()>,
+}
+
+impl TestServer {
+    fn url(&self) -> String {
+        self.url.clone()
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
 
 fn test_config() -> SidecarConfig {
     SidecarConfig {
@@ -178,7 +196,7 @@ async fn hermes_hook_keeps_shell_hook_response_shape() {
 async fn gateway_forwards_openai_json_without_rewriting_payload() {
     let upstream = spawn_upstream(false).await;
     let mut config = test_config();
-    config.openai_base_url = upstream;
+    config.openai_base_url = upstream.url();
     let app = router(config);
     let response = app
         .oneshot(
@@ -211,7 +229,7 @@ async fn gateway_forwards_openai_json_without_rewriting_payload() {
 async fn gateway_preserves_streaming_body() {
     let upstream = spawn_upstream(true).await;
     let mut config = test_config();
-    config.openai_base_url = upstream;
+    config.openai_base_url = upstream.url();
     let app = router(config);
     let response = app
         .oneshot(
@@ -244,7 +262,7 @@ async fn gateway_preserves_streaming_body() {
 async fn gateway_surfaces_streaming_upstream_errors() {
     let upstream = spawn_failing_stream_upstream().await;
     let mut config = test_config();
-    config.openai_base_url = upstream;
+    config.openai_base_url = upstream.url();
     let app = router(config);
     let response = app
         .oneshot(
@@ -310,7 +328,7 @@ async fn gateway_returns_bad_gateway_when_upstream_is_unreachable() {
 async fn models_route_forwards_get_requests() {
     let upstream = spawn_models_upstream().await;
     let mut config = test_config();
-    config.openai_base_url = upstream;
+    config.openai_base_url = upstream.url();
     let app = router(config);
     let response = app
         .oneshot(
@@ -331,7 +349,7 @@ async fn models_route_forwards_get_requests() {
     assert_eq!(body["authorization"], json!("Bearer test"));
 }
 
-async fn spawn_upstream(streaming: bool) -> String {
+async fn spawn_upstream(streaming: bool) -> TestServer {
     async fn chat(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
         let payload: Value = serde_json::from_slice(&body).unwrap();
         Json(json!({
@@ -363,13 +381,16 @@ async fn spawn_upstream(streaming: bool) -> String {
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{address}")
+    TestServer {
+        url: format!("http://{address}"),
+        handle,
+    }
 }
 
-async fn spawn_failing_stream_upstream() -> String {
+async fn spawn_failing_stream_upstream() -> TestServer {
     async fn stream_response() -> impl IntoResponse {
         let chunks = stream::iter([
             Ok::<_, std::io::Error>(Bytes::from_static(b"data: one\n\n")),
@@ -384,13 +405,16 @@ async fn spawn_failing_stream_upstream() -> String {
     let app = Router::new().route("/v1/responses", post(stream_response));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{address}")
+    TestServer {
+        url: format!("http://{address}"),
+        handle,
+    }
 }
 
-async fn spawn_models_upstream() -> String {
+async fn spawn_models_upstream() -> TestServer {
     async fn models(headers: HeaderMap, request: Request<Body>) -> impl IntoResponse {
         Json(json!({
             "path": request.uri().path_and_query().map(|value| value.as_str()),
@@ -403,8 +427,11 @@ async fn spawn_models_upstream() -> String {
     let app = Router::new().route("/v1/models", get(models));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{address}")
+    TestServer {
+        url: format!("http://{address}"),
+        handle,
+    }
 }

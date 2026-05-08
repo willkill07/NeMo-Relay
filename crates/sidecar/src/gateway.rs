@@ -13,6 +13,8 @@ use crate::error::SidecarError;
 use crate::server::AppState;
 use crate::session::{ActiveLlm, LlmGatewayStart, SessionManager};
 
+const MAX_BODY_BYTES: usize = 100 * 1024 * 1024;
+
 /// Proxies supported LLM API requests while recording a NeMo Flow LLM call around the upstream work.
 ///
 /// The gateway reads the full request body once so it can both forward exact bytes and derive
@@ -63,7 +65,7 @@ async fn prepare_gateway_request(
     let provider = ProviderRoute::from_path(parts.uri.path()).ok_or_else(|| {
         SidecarError::InvalidPayload(format!("unsupported gateway path {}", parts.uri.path()))
     })?;
-    let body_bytes = axum::body::to_bytes(body, usize::MAX)
+    let body_bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
         .await
         .map_err(|error| SidecarError::InvalidPayload(error.to_string()))?;
     let request_json = serde_json::from_slice::<Value>(&body_bytes).unwrap_or(Value::Null);

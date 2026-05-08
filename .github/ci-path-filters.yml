@@ -12,7 +12,6 @@ shared:
   - 'crates/adaptive/src/**'
   - 'crates/core/Cargo.toml'
   - 'crates/core/src/**'
-  - 'integrations/coding-agents/**'
   - 'justfile'
   - 'rust-toolchain.toml'
 

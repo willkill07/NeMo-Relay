@@ -152,8 +152,8 @@ def call_end(
             the emitted end event. Accepts an ``AnnotatedLLMResponse`` returned
             by a codec, or a JSON-compatible mapping matching that schema.
         response_codec: Optional response codec used to derive
-            ``annotated_response`` from ``response`` for observability. Ignored
-            when ``annotated_response`` is provided.
+            ``annotated_response`` from the sanitized end-event payload for
+            observability. Ignored when ``annotated_response`` is provided.
         timestamp: Optional timezone-aware ``datetime`` recorded on the emitted
             end event. When omitted, the runtime default end timestamp is used.
 
@@ -164,6 +164,8 @@ def call_end(
         ``call_end()`` applies sanitize-response guardrails to the emitted
         end-event payload. ``response_codec`` and ``annotated_response`` enrich
         observability output only and do not rewrite the recorded response.
+        Response codec failures are raised after the end event is emitted
+        without an annotation.
         ``timestamp`` must be a timezone-aware ``datetime``; strings and naive
         datetimes are rejected.
     """

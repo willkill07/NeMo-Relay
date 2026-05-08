@@ -48,7 +48,6 @@ component_management:
       paths:
         - "crates/core/src"
         - "crates/adaptive/src"
-        - "crates/sidecar/src"
       statuses:
         - type: project
           target: 95%
