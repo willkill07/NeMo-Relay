@@ -312,12 +312,13 @@ impl PreparedRun {
 
     // Injects Codex hook and provider configuration through repeated `--config` flags. Codex
     // reserves built-in provider IDs, so run mode installs a temporary provider alias instead of
-    // overriding `model_providers.openai`.
+    // overriding `model_providers.openai`. Uses `features.hooks=true` introduced in codex-cli
+    // 0.129; the older `features.codex_hooks` is deprecated. Requires codex-cli >= 0.129.0.
     fn prepare_codex(&mut self, sidecar_url: &str) {
         let hook_command = hook_forward_command(CodingAgent::Codex);
         let mut args = vec![
             "--config".to_string(),
-            "features.codex_hooks=true".to_string(),
+            "features.hooks=true".to_string(),
             "--config".to_string(),
             "model_provider=\"nemo-flow-openai\"".to_string(),
             "--config".to_string(),

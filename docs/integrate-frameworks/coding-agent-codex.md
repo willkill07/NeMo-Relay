@@ -10,6 +10,13 @@ sessions that honor the same local config and gateway routing. Cloud or remote
 Codex tasks are partial or unsupported for local sidecar LLM capture because the
 local sidecar cannot observe provider traffic that never reaches the machine.
 
+## Requirements
+
+`codex-cli >= 0.129.0`. The sidecar uses the `features.hooks` flag and the
+`nemo-flow-openai` provider alias, both of which require this version. Earlier
+versions either reject the provider override or do not recognize the hooks
+feature flag.
+
 ## Transparent Run
 
 Use the wrapper for no-install local observability:

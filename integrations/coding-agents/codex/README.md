@@ -13,6 +13,9 @@ supported only when they run locally and honor the same hook/plugin config and
 provider routing. Cloud or remote Codex tasks are partial or unsupported for
 local sidecar LLM capture.
 
+Requires `codex-cli >= 0.129.0` (introduced the `features.hooks` flag and the
+provider alias surface the sidecar relies on).
+
 ## Files
 
 - `.codex-plugin/plugin.json` describes the Codex plugin package.

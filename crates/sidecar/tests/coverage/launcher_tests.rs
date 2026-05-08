@@ -165,7 +165,7 @@ fn prepares_codex_config_overrides() {
     )
     .unwrap();
 
-    assert!(prepared.argv.contains(&"features.codex_hooks=true".into()));
+    assert!(prepared.argv.contains(&"features.hooks=true".into()));
     assert!(
         prepared
             .argv
