@@ -87,7 +87,7 @@ provider alias instead of overriding the reserved built-in `openai` provider:
 model_provider = "nemo-flow-openai"
 
 [model_providers.nemo-flow-openai]
-name = "Nemo Flow OpenAI"
+name = "NeMo Flow OpenAI"
 base_url = "http://127.0.0.1:4040"
 wire_api = "responses"
 requires_openai_auth = true
@@ -109,9 +109,10 @@ retained as private LLM correlation hints and are not emitted as standalone
 NeMo Flow events.
 
 The transparent wrapper passes hook entries as Codex CLI config overrides and
-sets `features.codex_hooks=true` for that launched process. Persistent install
-writes `.codex/config.toml` with `codex_hooks = true` and merges generated hook
-entries into `.codex/hooks.json`.
+sets `features.hooks=true` for that launched process. Persistent install writes
+`.codex/config.toml` with `hooks = true` and merges generated hook entries into
+`.codex/hooks.json`. (`features.codex_hooks` is the legacy alias of
+`features.hooks`; new docs and configurations should prefer the canonical name.)
 
 ## Smoke Test
 
@@ -136,7 +137,7 @@ ls .nemo-flow/atif
 ```
 
 The sidecar writes `<session-id>.atif.json` on session end. If the file is
-missing, confirm `codex_hooks = true`, hook config loading, and `--atif-dir` or
+missing, confirm `hooks = true`, hook config loading, and `--atif-dir` or
 `NEMO_FLOW_ATIF_DIR`.
 
 ## Troubleshoot LLM Lifecycle

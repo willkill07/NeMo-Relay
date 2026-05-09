@@ -474,7 +474,7 @@ async fn wait_for_health(sidecar_url: &str) -> Result<(), SidecarError> {
 
 fn codex_sidecar_provider_config(sidecar_url: &str) -> String {
     format!(
-        "model_providers.nemo-flow-openai={{name=\"Nemo Flow OpenAI\",base_url={},wire_api=\"responses\",requires_openai_auth=true,supports_websockets=false}}",
+        "model_providers.nemo-flow-openai={{name=\"NeMo Flow OpenAI\",base_url={},wire_api=\"responses\",requires_openai_auth=true,supports_websockets=false}}",
         toml_string(sidecar_url)
     )
 }

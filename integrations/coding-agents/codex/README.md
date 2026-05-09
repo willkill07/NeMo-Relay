@@ -31,7 +31,7 @@ The bundle forwards `SessionStart`, `SessionEnd`, `SubagentStart`,
 provide private LLM correlation hints for gateway requests.
 
 Transparent setup injects these hooks with CLI config overrides. Persistent
-setup writes `codex_hooks = true` in `.codex/config.toml` and merges the hook
+setup writes `hooks = true` in `.codex/config.toml` and merges the hook
 entries into `.codex/hooks.json`.
 
 ## Transparent Setup
@@ -101,7 +101,7 @@ provider alias instead of overriding the reserved built-in `openai` provider:
 model_provider = "nemo-flow-openai"
 
 [model_providers.nemo-flow-openai]
-name = "Nemo Flow OpenAI"
+name = "NeMo Flow OpenAI"
 base_url = "http://127.0.0.1:4040"
 wire_api = "responses"
 requires_openai_auth = true
