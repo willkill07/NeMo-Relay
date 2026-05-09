@@ -136,9 +136,13 @@ End the Codex session and confirm ATIF exists:
 ls .nemo-flow/atif
 ```
 
-The sidecar writes `<session-id>.atif.json` on session end. If the file is
-missing, confirm `hooks = true`, hook config loading, and `--atif-dir` or
-`NEMO_FLOW_ATIF_DIR`.
+The sidecar writes `<session-id>.atif.json` after every conversation turn for
+Codex sessions (Codex's hook surface has no `SessionEnd`-equivalent event, so
+the sidecar uses each per-turn `Stop` hook to snapshot the trajectory; the file
+grows cumulatively across turns and the final write reflects the full session).
+For agents that do emit a session-end hook, the same file is written once on
+session close. If the file is missing, confirm `hooks = true`, hook config
+loading, and `--atif-dir` or `NEMO_FLOW_ATIF_DIR`.
 
 ## Troubleshoot LLM Lifecycle
 

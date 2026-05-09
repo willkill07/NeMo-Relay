@@ -39,7 +39,7 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
         };
     }
 
-    let event = classify(
+    let events = classify(
         &payload,
         headers,
         &ClassificationRules {
@@ -53,7 +53,7 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
         },
     );
     AdapterOutcome {
-        events: vec![event],
+        events,
         response: json!({}),
     }
 }

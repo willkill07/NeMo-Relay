@@ -13,7 +13,7 @@ use crate::model::{AgentKind, NormalizedEvent};
 /// start/end events. Tool starts are fail-open with an explicit `allow` permission response so
 /// the sidecar records activity without becoming a policy engine for Cursor executions.
 pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
-    let event = classify(
+    let events = classify(
         &payload,
         headers,
         &ClassificationRules {
@@ -31,18 +31,16 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
             ],
         },
     );
-    let response = match &event {
-        NormalizedEvent::ToolStarted(_) => json!({
+    // Response shape is determined by the primary event (first in the vec).
+    let response = match events.first() {
+        Some(NormalizedEvent::ToolStarted(_)) => json!({
             "continue": true,
             "permission": "allow",
             "user_message": null,
             "agent_message": null
         }),
-        NormalizedEvent::AgentEnded(_) => json!({ "continue": true }),
+        Some(NormalizedEvent::AgentEnded(_)) => json!({ "continue": true }),
         _ => json!({ "continue": true }),
     };
-    AdapterOutcome {
-        events: vec![event],
-        response,
-    }
+    AdapterOutcome { events, response }
 }

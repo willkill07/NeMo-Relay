@@ -348,10 +348,38 @@ fn value_at(payload: &Value, path: &[&str]) -> Option<Value> {
     Some(current.clone())
 }
 
+// Classifies a raw hook event into one or more normalized events.
+//
+// Most hook events produce a single normalized event from `classify_primary`. The exception is
+// `Stop` (Claude/Codex): it emits both the existing `LlmHint` (preserving correlation for
+// subsequent LLM calls) AND a `TurnEnded` so the session manager can snapshot ATIF without
+// closing the agent scope. Codex 0.129 has no `SessionEnd`-equivalent hook — without this dual
+// emission, codex transparent runs would never trigger an ATIF write.
+//
+// If the primary event is already terminal (e.g., Cursor classifies `stop` as `AgentEnded`),
+// the snapshot is skipped to avoid double-writing — `flush_observers` already writes ATIF on
+// agent-end, and a follow-up `TurnEnded` on a removed session would recreate an empty session
+// and overwrite the freshly-written ATIF with an empty trajectory.
+fn classify(
+    payload: &Value,
+    headers: &HeaderMap,
+    rules: &ClassificationRules<'_>,
+) -> Vec<NormalizedEvent> {
+    let primary = classify_primary(payload, headers, rules);
+    let normalized = normalize_name(&event_name(payload));
+    if normalized == "stop" && !primary.is_terminal() {
+        return vec![
+            primary,
+            NormalizedEvent::TurnEnded(common_session_event(payload, headers, rules.kind)),
+        ];
+    }
+    vec![primary]
+}
+
 // Classifies a raw hook event using adapter-specific lifecycle names first and generic sidecar
 // names second. Unknown events are intentionally converted to hook marks, not errors, so new agent
 // hook types remain observable until first-class normalization rules are added.
-fn classify(
+fn classify_primary(
     payload: &Value,
     headers: &HeaderMap,
     rules: &ClassificationRules<'_>,

@@ -262,6 +262,11 @@ impl SessionManager {
             .map(|session| session.llms.is_empty())
             .unwrap_or(true)
     }
+
+    #[cfg(test)]
+    pub(crate) async fn open_session_count(&self) -> usize {
+        self.inner.lock().await.len()
+    }
 }
 
 impl Session {
@@ -296,6 +301,7 @@ impl Session {
                 match event {
                     NormalizedEvent::AgentStarted(event) => self.start_agent(event),
                     NormalizedEvent::AgentEnded(event) => self.end_agent(event),
+                    NormalizedEvent::TurnEnded(_) => self.snapshot_atif(),
                     NormalizedEvent::SubagentStarted(event) => self.start_subagent(event),
                     NormalizedEvent::SubagentEnded(event) => self.end_subagent(event),
                     NormalizedEvent::LlmHint(event) => self.add_llm_hint(event),
@@ -310,6 +316,22 @@ impl Session {
                 }
             })
             .await
+    }
+
+    /// Writes ATIF for the current session without closing the agent scope or shutting observers
+    /// down. Triggered by `TurnEnded` (per-turn `Stop` hooks). Each turn produces a cumulative
+    /// snapshot — `AtifExporter::export()` is documented as non-destructive, so subsequent turns
+    /// add events on top and last-write-wins semantics yield a complete trajectory by the final
+    /// turn. No-op when `agent_scope` was never opened or when the session has no ATIF observer
+    /// installed (e.g., `atif_dir` not configured).
+    fn snapshot_atif(&mut self) -> Result<(), SidecarError> {
+        if self.agent_scope.is_none() {
+            return Ok(());
+        }
+        if let (Some(exporter), Some(directory)) = (&self.atif, &self.config.atif_dir) {
+            write_atif(directory, &self.session_id, exporter)?;
+        }
+        Ok(())
     }
 
     // Opens an LLM call for gateway traffic, creating the agent scope if needed and resolving the
@@ -1436,6 +1458,7 @@ fn event_agent_kind(event: &NormalizedEvent) -> AgentKind {
     match event {
         NormalizedEvent::AgentStarted(event)
         | NormalizedEvent::AgentEnded(event)
+        | NormalizedEvent::TurnEnded(event)
         | NormalizedEvent::PromptSubmitted(event)
         | NormalizedEvent::Compaction(event)
         | NormalizedEvent::Notification(event)

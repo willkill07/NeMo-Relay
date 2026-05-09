@@ -161,6 +161,63 @@ fn maps_claude_stop_response_shape() {
     );
 }
 
+// Stop hook on Claude/Codex/Cursor (per-turn boundary) must yield a TurnEnded event so the
+// session manager can snapshot ATIF without closing the agent scope. Codex needs this because
+// it has no SessionEnd hook; Claude/Cursor get it for free for resilience.
+#[test]
+fn stop_hook_emits_turn_ended_for_codex() {
+    let outcome = codex::adapt(
+        json!({ "session_id": "codex-session", "hook_event_name": "Stop" }),
+        &HeaderMap::new(),
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, NormalizedEvent::TurnEnded(_))),
+        "codex Stop must produce a TurnEnded event for ATIF snapshot. events: {:?}",
+        outcome.events
+    );
+}
+
+#[test]
+fn stop_hook_emits_turn_ended_for_claude() {
+    let outcome = claude_code::adapt(
+        json!({ "session_id": "claude-session", "hook_event_name": "Stop" }),
+        &HeaderMap::new(),
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, NormalizedEvent::TurnEnded(_))),
+        "claude Stop must produce a TurnEnded event for ATIF snapshot"
+    );
+}
+
+// Cursor classifies `stop` as AgentEnded (its existing per-adapter rule). The TurnEnded path
+// must NOT also fire there — flush_observers already writes ATIF on agent-end, and a follow-up
+// snapshot on a removed session would recreate an empty session and overwrite the freshly
+// written file with an empty trajectory.
+#[test]
+fn stop_hook_does_not_double_emit_for_cursor_agent_end() {
+    let outcome = cursor::adapt(
+        json!({ "session_id": "cursor-session", "hook_event_name": "stop" }),
+        &HeaderMap::new(),
+    );
+    assert!(
+        matches!(outcome.events.first(), Some(NormalizedEvent::AgentEnded(_))),
+        "cursor stop must classify as AgentEnded"
+    );
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, NormalizedEvent::TurnEnded(_))),
+        "cursor stop must NOT also produce TurnEnded — would double-write ATIF then wipe it"
+    );
+}
+
 #[test]
 fn adapter_string_lookup_accepts_scalar_values_only() {
     let payload = json!({

@@ -30,6 +30,13 @@ impl AgentKind {
 pub(crate) enum NormalizedEvent {
     AgentStarted(SessionEvent),
     AgentEnded(SessionEvent),
+    /// Conversation-turn boundary that the sidecar uses to snapshot ATIF without closing the
+    /// agent scope. Emitted alongside `LlmHint` for `Stop` hooks (Claude/Codex/Cursor).
+    /// Required for codex 0.129 transparent runs because codex has no `SessionEnd`-equivalent
+    /// event — the last `Stop` of the session leaves an up-to-date ATIF on disk. Multi-turn
+    /// sessions write progressively complete trajectories; the underlying `AtifExporter::export()`
+    /// is non-destructive so each snapshot is a cumulative superset of prior writes.
+    TurnEnded(SessionEvent),
     SubagentStarted(SubagentEvent),
     SubagentEnded(SubagentEvent),
     LlmHint(LlmHintEvent),
@@ -51,6 +58,7 @@ impl NormalizedEvent {
         match self {
             Self::AgentStarted(event)
             | Self::AgentEnded(event)
+            | Self::TurnEnded(event)
             | Self::PromptSubmitted(event)
             | Self::Compaction(event)
             | Self::Notification(event)
@@ -63,6 +71,7 @@ impl NormalizedEvent {
     }
 
     pub(crate) fn is_terminal(&self) -> bool {
+        // TurnEnded is intentionally NOT terminal — the agent scope stays open across turns.
         matches!(
             self,
             Self::AgentEnded(_) | Self::SubagentEnded(_) | Self::LlmEnded(_) | Self::ToolEnded(_)

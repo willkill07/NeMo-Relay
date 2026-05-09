@@ -13,7 +13,7 @@ use crate::model::AgentKind;
 /// hooks instead of making allow/deny decisions. Event spelling is accepted in both camelCase and
 /// snake_case forms so installed hooks and inline `run` hook configuration share one path.
 pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
-    let event = classify(
+    let events = classify(
         &payload,
         headers,
         &ClassificationRules {
@@ -27,7 +27,7 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
         },
     );
     AdapterOutcome {
-        events: vec![event],
+        events,
         response: json!({}),
     }
 }

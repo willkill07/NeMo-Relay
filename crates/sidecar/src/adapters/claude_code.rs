@@ -15,7 +15,7 @@ use crate::model::{AgentKind, NormalizedEvent};
 /// by default. Note: Claude's hook output schema rejects `null` for optional string fields like
 /// `stopReason`; omit them entirely instead.
 pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
-    let event = classify(
+    let events = classify(
         &payload,
         headers,
         &ClassificationRules {
@@ -37,8 +37,10 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
             ],
         },
     );
-    let response = match &event {
-        NormalizedEvent::ToolStarted(_) => json!({
+    // Response shape is decided by the primary event (first in the vec); secondary events like
+    // `TurnEnded` are observability-only and don't influence the hook response Claude gets back.
+    let response = match events.first() {
+        Some(NormalizedEvent::ToolStarted(_)) => json!({
             "continue": true,
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -47,8 +49,5 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
         }),
         _ => json!({ "continue": true }),
     };
-    AdapterOutcome {
-        events: vec![event],
-        response,
-    }
+    AdapterOutcome { events, response }
 }

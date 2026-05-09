@@ -1700,6 +1700,122 @@ async fn synthetic_gateway_session_keeps_gateway_label() {
     assert_eq!(atif["agent"]["name"], json!("gateway"));
 }
 
+// `TurnEnded` (synthesized from per-turn `Stop` hooks) writes ATIF without closing the agent
+// scope. This is the codex-0.129 workaround: codex has no `SessionEnd` hook, so per-turn
+// snapshots are how its ATIF gets written. After several turns the agent scope must remain open
+// and the trajectory file must reflect cumulative state.
+#[tokio::test]
+async fn turn_ended_snapshots_atif_without_closing_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = SidecarConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+        anthropic_base_url: "http://127.0.0.1".into(),
+        atif_dir: Some(temp.path().to_path_buf()),
+        openinference_endpoint: None,
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let headers = HeaderMap::new();
+
+    // Open a codex session.
+    manager
+        .apply_events(
+            &headers,
+            vec![NormalizedEvent::AgentStarted(SessionEvent {
+                session_id: "codex-multi-turn".into(),
+                agent_kind: AgentKind::Codex,
+                event_name: "SessionStart".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+    assert_eq!(manager.open_session_count().await, 1);
+
+    // First turn ends — ATIF should be written even though SessionEnd never arrived.
+    manager
+        .apply_events(
+            &headers,
+            vec![NormalizedEvent::TurnEnded(SessionEvent {
+                session_id: "codex-multi-turn".into(),
+                agent_kind: AgentKind::Codex,
+                event_name: "Stop".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+
+    let atif_path = temp.path().join("codex-multi-turn.atif.json");
+    assert!(
+        atif_path.exists(),
+        "TurnEnded must produce an ATIF file during an open session"
+    );
+    // Session is still open — TurnEnded must not have torn it down.
+    assert_eq!(
+        manager.open_session_count().await,
+        1,
+        "TurnEnded must NOT close the agent scope or remove the session"
+    );
+
+    // Second turn ends — file should be overwritten with a cumulative trajectory.
+    manager
+        .apply_events(
+            &headers,
+            vec![NormalizedEvent::TurnEnded(SessionEvent {
+                session_id: "codex-multi-turn".into(),
+                agent_kind: AgentKind::Codex,
+                event_name: "Stop".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+    assert!(atif_path.exists());
+    assert_eq!(manager.open_session_count().await, 1);
+
+    let trajectory: Value = serde_json::from_slice(&std::fs::read(&atif_path).unwrap()).unwrap();
+    assert_eq!(trajectory["session_id"], json!("codex-multi-turn"));
+    assert_eq!(trajectory["agent"]["name"], json!("codex"));
+}
+
+// TurnEnded for a session that was never opened (no AgentStarted, no gateway LLM) is a no-op —
+// no observers were ever installed, so there's nothing to flush.
+#[tokio::test]
+async fn turn_ended_is_noop_for_session_with_no_agent_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = SidecarConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+        anthropic_base_url: "http://127.0.0.1".into(),
+        atif_dir: Some(temp.path().to_path_buf()),
+        openinference_endpoint: None,
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    manager
+        .apply_events(
+            &HeaderMap::new(),
+            vec![NormalizedEvent::TurnEnded(SessionEvent {
+                session_id: "no-agent".into(),
+                agent_kind: AgentKind::Codex,
+                event_name: "Stop".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+    // No file should be created — the snapshot needs an active session with installed observers.
+    assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+}
+
 fn session_event(session_id: &str, event_name: &str) -> SessionEvent {
     SessionEvent {
         session_id: session_id.into(),
