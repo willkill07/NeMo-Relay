@@ -136,7 +136,14 @@ fn parse_sse_frame(frame: &str) -> Result<Option<SseEvent>> {
         return Ok(None);
     }
     let payload = data_parts.join("\n");
-    let data: Json = serde_json::from_str(payload.trim()).map_err(|error| {
+    let trimmed = payload.trim();
+    // OpenAI Chat Completions emits a `data: [DONE]` terminator as a wire-level end-of-stream
+    // sentinel. It's not a JSON payload — drop it like a heartbeat. Other providers (Anthropic,
+    // OpenAI Responses) have proper terminal events instead, so this only fires for OpenAI Chat.
+    if trimmed == "[DONE]" {
+        return Ok(None);
+    }
+    let data: Json = serde_json::from_str(trimmed).map_err(|error| {
         FlowError::Internal(format!(
             "streaming codec failed to parse SSE data payload: {error}: {payload}"
         ))
@@ -194,6 +201,20 @@ mod tests {
             .unwrap();
         let trailing = decoder.finish().unwrap().expect("trailing frame present");
         assert_eq!(trailing.data, json!({"end": true}));
+    }
+
+    #[test]
+    fn drops_openai_chat_done_sentinel() {
+        let mut decoder = SseEventDecoder::new();
+        let events = decoder
+            .push_bytes(
+                b"data: {\"id\":\"chatcmpl-1\"}\n\ndata: [DONE]\n\ndata: {\"id\":\"chatcmpl-2\"}\n\n",
+            )
+            .unwrap();
+        // [DONE] is dropped; surrounding JSON events still come through.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data, json!({"id": "chatcmpl-1"}));
+        assert_eq!(events[1].data, json!({"id": "chatcmpl-2"}));
     }
 
     #[test]
