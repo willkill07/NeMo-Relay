@@ -139,6 +139,13 @@ impl SessionManager {
     /// Session configuration is re-read from headers for each request so installed hook commands can
     /// override exporters or metadata per invocation. Empty sessions are removed after lifecycle
     /// closure to avoid retaining stale correlation state.
+    ///
+    /// When an `AgentStarted` event arrives for a session that was already created by the gateway
+    /// path (i.e., agent_kind is still `Gateway` because an LLM call beat the SessionStart hook),
+    /// upgrade the session's agent_kind to the real one carried in the event so subsequent
+    /// metadata reflects the actual agent. Note: agent-scope and observer identities are baked at
+    /// scope-open time, so this upgrade applies to session metadata only — the
+    /// provider-inferred kind set in `start_llm` is the primary defense.
     pub(crate) async fn apply_events(
         &self,
         headers: &HeaderMap,
@@ -151,9 +158,16 @@ impl SessionManager {
                 continue;
             }
             let config = self.default_config.session_config_from_headers(headers);
-            let session = sessions.entry(session_id.clone()).or_insert_with(|| {
-                Session::new(session_id.clone(), event_agent_kind(&event), config.clone())
-            });
+            let event_kind = event_agent_kind(&event);
+            let session = sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| Session::new(session_id.clone(), event_kind, config.clone()));
+            if matches!(&event, NormalizedEvent::AgentStarted(_))
+                && session.agent_kind == AgentKind::Gateway
+                && event_kind != AgentKind::Gateway
+            {
+                session.agent_kind = event_kind;
+            }
             session.apply(event).await?;
             if session.agent_scope.is_none()
                 && session.subagents.is_empty()
@@ -171,7 +185,13 @@ impl SessionManager {
     ///
     /// Explicit session IDs win, a single active hook session is reused as a convenience fallback,
     /// and otherwise a synthetic gateway session is created so pure proxy use still emits runtime
-    /// events.
+    /// events. When this path creates a brand-new session (i.e., a real agent's gateway request
+    /// beat its SessionStart hook), the session's agent_kind is inferred from the gateway provider
+    /// rather than defaulting to `Gateway`. Without this inference, the session's exported agent
+    /// name (in ATIF and Phoenix scope spans) would freeze as "gateway" for the lifetime of the
+    /// session, even after a SessionStart hook arrives, because observer identities are baked at
+    /// scope-open time. With it, an Anthropic Messages call before SessionStart still labels the
+    /// trace as `claude-code`, an OpenAI Responses call as `codex`, etc.
     pub(crate) async fn start_llm(
         &self,
         headers: &HeaderMap,
@@ -184,9 +204,10 @@ impl SessionManager {
             .clone()
             .or_else(|| single_active_session_id(&sessions))
             .unwrap_or_else(|| format!("{}-gateway", AgentKind::Gateway.as_str()));
+        let inferred_agent_kind = agent_kind_for_gateway_provider(&start.provider);
         let session = sessions
             .entry(session_id.clone())
-            .or_insert_with(|| Session::new(session_id, AgentKind::Gateway, config));
+            .or_insert_with(|| Session::new(session_id, inferred_agent_kind, config));
         session.start_llm(start).await
     }
 
@@ -1434,6 +1455,20 @@ fn single_active_session_id(sessions: &HashMap<String, Session>) -> Option<Strin
     (sessions.len() == 1)
         .then(|| sessions.keys().next().cloned())
         .flatten()
+}
+
+// Infers the owning agent for a session created by a gateway request that beat its SessionStart
+// hook. Mapping is by provider route name (set by `gateway::start_gateway_llm`):
+// `anthropic.messages` → ClaudeCode, `openai.responses` → Codex. Unknown providers fall back to
+// `Gateway` so synthetic sessions opened by pure proxy use still get the legacy label. This is
+// the only chance to label the session correctly because observer identities (ATIF agent name,
+// OpenInference scope name) are baked at scope-open time inside `ensure_agent_started`.
+fn agent_kind_for_gateway_provider(provider: &str) -> AgentKind {
+    match provider {
+        "anthropic.messages" | "anthropic.count_tokens" => AgentKind::ClaudeCode,
+        "openai.responses" => AgentKind::Codex,
+        _ => AgentKind::Gateway,
+    }
 }
 
 // Merges metadata objects with right-hand values taking precedence and null right-hand fields

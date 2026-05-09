@@ -1562,6 +1562,144 @@ fn session_test_config() -> SidecarConfig {
     }
 }
 
+// Regression: an Anthropic Messages gateway request that arrives before SessionStart used to
+// freeze the session label as "gateway" (default agent_kind) for the rest of the session,
+// because observer identities are baked at scope-open time. The session must instead be labeled
+// `claude-code` from the provider, so ATIF and Phoenix root spans reflect the real agent.
+#[tokio::test]
+async fn gateway_first_anthropic_call_labels_session_as_claude_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = SidecarConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+        anthropic_base_url: "http://127.0.0.1".into(),
+        atif_dir: Some(temp.path().to_path_buf()),
+        openinference_endpoint: None,
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let mut start = llm_start();
+    start.session_id = Some("claude-uuid".into());
+    start.provider = "anthropic.messages".into();
+    let active = manager.start_llm(&HeaderMap::new(), start).await.unwrap();
+    manager
+        .end_llm(active, json!({ "ok": true }), json!({}))
+        .await
+        .unwrap();
+    // Drive an explicit AgentEnded so flush_observers writes ATIF.
+    manager
+        .apply_events(
+            &HeaderMap::new(),
+            vec![NormalizedEvent::AgentEnded(SessionEvent {
+                session_id: "claude-uuid".into(),
+                agent_kind: AgentKind::ClaudeCode,
+                event_name: "SessionEnd".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+
+    let atif: Value = serde_json::from_str(
+        &std::fs::read_to_string(temp.path().join("claude-uuid.atif.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        atif["agent"]["name"],
+        json!("claude-code"),
+        "session created from anthropic.messages gateway request must be labeled claude-code, not gateway"
+    );
+}
+
+// OpenAI Responses gateway requests (codex's API path) must label the session as `codex`.
+#[tokio::test]
+async fn gateway_first_openai_responses_call_labels_session_as_codex() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = SidecarConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+        anthropic_base_url: "http://127.0.0.1".into(),
+        atif_dir: Some(temp.path().to_path_buf()),
+        openinference_endpoint: None,
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let mut start = llm_start();
+    start.session_id = Some("codex-uuid".into());
+    start.provider = "openai.responses".into();
+    let active = manager.start_llm(&HeaderMap::new(), start).await.unwrap();
+    manager
+        .end_llm(active, json!({ "ok": true }), json!({}))
+        .await
+        .unwrap();
+    manager
+        .apply_events(
+            &HeaderMap::new(),
+            vec![NormalizedEvent::AgentEnded(SessionEvent {
+                session_id: "codex-uuid".into(),
+                agent_kind: AgentKind::Codex,
+                event_name: "SessionEnd".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+
+    let atif: Value = serde_json::from_str(
+        &std::fs::read_to_string(temp.path().join("codex-uuid.atif.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(atif["agent"]["name"], json!("codex"));
+}
+
+// Synthetic gateway-only sessions (pure proxy traffic, unknown provider) keep the legacy
+// `gateway` label so existing observability semantics for unattributed traffic are preserved.
+#[tokio::test]
+async fn synthetic_gateway_session_keeps_gateway_label() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = SidecarConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+        anthropic_base_url: "http://127.0.0.1".into(),
+        atif_dir: Some(temp.path().to_path_buf()),
+        openinference_endpoint: None,
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let mut start = llm_start();
+    start.session_id = None;
+    start.provider = "openai.chat_completions".into(); // ambiguous → Gateway
+    let active = manager.start_llm(&HeaderMap::new(), start).await.unwrap();
+    manager
+        .end_llm(active, json!({ "ok": true }), json!({}))
+        .await
+        .unwrap();
+    manager
+        .apply_events(
+            &HeaderMap::new(),
+            vec![NormalizedEvent::AgentEnded(SessionEvent {
+                session_id: "gateway-gateway".into(),
+                agent_kind: AgentKind::Gateway,
+                event_name: "SessionEnd".into(),
+                payload: json!({}),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+
+    let atif: Value = serde_json::from_str(
+        &std::fs::read_to_string(temp.path().join("gateway-gateway.atif.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(atif["agent"]["name"], json!("gateway"));
+}
+
 fn session_event(session_id: &str, event_name: &str) -> SessionEvent {
     SessionEvent {
         session_id: session_id.into(),
