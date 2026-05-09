@@ -4,15 +4,16 @@
 use axum::http::HeaderMap;
 use serde_json::{Value, json};
 
-use crate::adapters::{AdapterOutcome, ClassificationRules, classify, event_name, normalize_name};
+use crate::adapters::{AdapterOutcome, ClassificationRules, classify};
 use crate::model::{AgentKind, NormalizedEvent};
 
 /// Normalizes Claude Code hook payloads and returns the hook response Claude expects.
 ///
 /// Claude Code uses permission-bearing tool hooks, so pre-tool events are explicitly allowed
-/// instead of returning the generic `{ continue: true }` shape. Stop hooks can arrive as either
-/// terminal events or LLM-style marks; both are acknowledged with a null stop reason so the
-/// sidecar remains observational and never blocks Claude's lifecycle by default.
+/// instead of returning the generic `{ continue: true }` shape. All other hooks acknowledge with
+/// `{ continue: true }` so the sidecar remains observational and never blocks Claude's lifecycle
+/// by default. Note: Claude's hook output schema rejects `null` for optional string fields like
+/// `stopReason`; omit them entirely instead.
 pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
     let event = classify(
         &payload,
@@ -36,7 +37,6 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
             ],
         },
     );
-    let normalized_event = normalize_name(&event_name(&payload));
     let response = match &event {
         NormalizedEvent::ToolStarted(_) => json!({
             "continue": true,
@@ -45,14 +45,6 @@ pub(crate) fn adapt(payload: Value, headers: &HeaderMap) -> AdapterOutcome {
                 "permissionDecision": "allow"
             }
         }),
-        NormalizedEvent::AgentEnded(_)
-        | NormalizedEvent::HookMark(_)
-        | NormalizedEvent::LlmHint(_)
-            if normalized_event == "stop" =>
-        {
-            json!({ "continue": true, "stopReason": null })
-        }
-        NormalizedEvent::AgentEnded(_) => json!({ "continue": true }),
         _ => json!({ "continue": true }),
     };
     AdapterOutcome {

@@ -14,19 +14,24 @@ use crate::config::{
 };
 use crate::error::SidecarError;
 
+// Claude Code's hook loader strictly whitelists event names — any unknown event causes the
+// entire hooks file to be rejected (no hooks register). Only events present in Claude Code's
+// whitelist as of 2.1.x belong here. Codex 0.129 has a smaller subset (SessionStart,
+// UserPromptSubmit, PreToolUse, PostToolUse, Stop, PreCompact, PostCompact, PermissionRequest)
+// and silently ignores events it doesn't recognize, so the union list is safe for both agents.
 const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "PostToolUseFailure",
-    "AfterAgentResponse",
-    "AfterAgentThought",
+    "PermissionRequest",
     "SubagentStart",
     "SubagentStop",
     "Notification",
     "Stop",
     "PreCompact",
+    "PostCompact",
     "SessionEnd",
 ];
 
@@ -454,8 +459,14 @@ pub(crate) fn generated_hooks(agent: CodingAgent, command: &str) -> Value {
     }
 }
 
-pub(crate) fn hook_forward_command(agent: CodingAgent) -> String {
-    format!("nemo-flow-sidecar hook-forward {}", agent.as_arg())
+// Returns the shell command a hook should run to forward an event to the sidecar. Callers must
+// pass the executable they want hooks to invoke. Transparent-run callers should pass the absolute
+// path of the currently running sidecar binary so spawned hook subprocesses do not depend on the
+// user's `PATH` (which Codex/Claude/Cursor inherit but which typically does not include
+// `target/debug` or other dev locations); persistent-install callers can pass the bare name
+// `"nemo-flow-sidecar"` because the user is expected to have the binary on `PATH` after install.
+pub(crate) fn hook_forward_command(executable: &str, agent: CodingAgent) -> String {
+    format!("{executable} hook-forward {}", agent.as_arg())
 }
 
 fn claude_hooks(command: &str) -> Value {

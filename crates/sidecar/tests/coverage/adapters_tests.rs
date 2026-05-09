@@ -152,9 +152,12 @@ fn maps_claude_stop_response_shape() {
         &HeaderMap::new(),
     );
 
-    assert_eq!(
-        outcome.response,
-        json!({ "continue": true, "stopReason": null })
+    // Claude's hook output schema rejects `null` for optional string fields like stopReason —
+    // the adapter must omit them entirely (return only `{ continue: true }`).
+    assert_eq!(outcome.response, json!({ "continue": true }));
+    assert!(
+        outcome.response.get("stopReason").is_none(),
+        "stopReason must not appear in the response (Claude rejects null)"
     );
 }
 
@@ -472,7 +475,10 @@ fn stop_responses_preserve_vendor_shapes() {
         &headers,
     );
     assert!(matches!(claude.events[0], NormalizedEvent::LlmHint(_)));
-    assert_eq!(claude.response["stopReason"], Value::Null);
+    assert!(
+        claude.response.get("stopReason").is_none(),
+        "stopReason must not be present (Claude rejects null per its hook schema)"
+    );
 
     let codex = codex::adapt(
         json!({

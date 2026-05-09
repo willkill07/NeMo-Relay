@@ -59,19 +59,9 @@
         ]
       }
     ],
-    "AfterAgentResponse": [
+    "PermissionRequest": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "nemo-flow-sidecar hook-forward codex",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "AfterAgentThought": [
-      {
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
@@ -126,6 +116,17 @@
       }
     ],
     "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nemo-flow-sidecar hook-forward codex",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
       {
         "hooks": [
           {

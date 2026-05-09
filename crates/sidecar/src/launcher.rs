@@ -296,7 +296,7 @@ impl PreparedRun {
             &root.join("hooks/hooks.json"),
             generated_hooks(
                 CodingAgent::ClaudeCode,
-                &hook_forward_command(CodingAgent::ClaudeCode),
+                &hook_forward_command(&transparent_hook_executable(), CodingAgent::ClaudeCode),
             ),
         )?;
         insert_after_agent(
@@ -315,7 +315,7 @@ impl PreparedRun {
     // overriding `model_providers.openai`. Uses `features.hooks=true` introduced in codex-cli
     // 0.129; the older `features.codex_hooks` is deprecated. Requires codex-cli >= 0.129.0.
     fn prepare_codex(&mut self, sidecar_url: &str) {
-        let hook_command = hook_forward_command(CodingAgent::Codex);
+        let hook_command = hook_forward_command(&transparent_hook_executable(), CodingAgent::Codex);
         let mut args = vec![
             "--config".to_string(),
             "features.hooks=true".to_string(),
@@ -479,6 +479,19 @@ fn codex_sidecar_provider_config(sidecar_url: &str) -> String {
     )
 }
 
+// Returns the absolute path of the running sidecar binary so injected hooks can find it
+// without relying on the user's `PATH`. Spawned hook subprocesses inherit the agent's
+// environment; in transparent run, the dev/install location of the sidecar is rarely on
+// `PATH`, which would cause hooks to exit with status 127 (command not found). Falls back
+// to the bare name when `current_exe` is unavailable so behavior degrades to the previous
+// install-style assumption rather than failing to launch.
+fn transparent_hook_executable() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "nemo-flow-sidecar".to_string())
+}
+
 // Inserts generated agent flags immediately after the last argv element that looks like the agent
 // executable. Falling back to index 0 keeps wrapper commands usable by inserting after the first
 // word when the agent cannot be found later in argv.
@@ -529,7 +542,7 @@ fn write_merged_cursor_hooks(path: &Path) -> Result<(), SidecarError> {
         read_json_file(path)?,
         generated_hooks(
             CodingAgent::Cursor,
-            &hook_forward_command(CodingAgent::Cursor),
+            &hook_forward_command(&transparent_hook_executable(), CodingAgent::Cursor),
         ),
     )?)
     .map_err(|error| SidecarError::Launch(error.to_string()))?;

@@ -39,14 +39,23 @@ fn generates_claude_install_file() {
     let json: Value = serde_json::from_str(&files[0].contents).unwrap();
     assert!(json["hooks"]["SessionStart"].is_array());
     assert!(json["hooks"]["UserPromptSubmit"].is_array());
-    assert!(json["hooks"]["AfterAgentResponse"].is_array());
-    assert!(json["hooks"]["AfterAgentThought"].is_array());
+    assert!(json["hooks"]["SessionEnd"].is_array());
+    assert!(json["hooks"]["Stop"].is_array());
     assert!(json["hooks"]["Notification"].is_array());
     assert!(
-        json["hooks"]["AfterAgentResponse"][0]
-            .get("matcher")
-            .is_none()
+        json["hooks"]["PermissionRequest"].is_array(),
+        "PermissionRequest must be injected (Claude + Codex both support it)"
     );
+    assert!(json["hooks"]["PostCompact"].is_array());
+    assert!(
+        json["hooks"]["AfterAgentResponse"].is_null(),
+        "AfterAgentResponse is not in Claude's hook whitelist; it must not be injected (would cause Claude to reject the entire hooks file)"
+    );
+    assert!(
+        json["hooks"]["AfterAgentThought"].is_null(),
+        "AfterAgentThought is not in Claude's hook whitelist; it must not be injected"
+    );
+    assert!(json["hooks"]["SessionEnd"][0].get("matcher").is_none());
     assert!(
         json["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
@@ -64,14 +73,23 @@ fn generates_codex_config_and_hooks() {
     let json: Value = serde_json::from_str(&files[1].contents).unwrap();
     assert!(json["hooks"]["Stop"].is_array());
     assert!(json["hooks"]["UserPromptSubmit"].is_array());
-    assert!(json["hooks"]["AfterAgentResponse"].is_array());
-    assert!(json["hooks"]["AfterAgentThought"].is_array());
+    assert!(json["hooks"]["SessionStart"].is_array());
+    assert!(json["hooks"]["SessionEnd"].is_array());
     assert!(json["hooks"]["Notification"].is_array());
     assert!(
-        json["hooks"]["AfterAgentThought"][0]
-            .get("matcher")
-            .is_none()
+        json["hooks"]["PermissionRequest"].is_array(),
+        "PermissionRequest must be injected for Codex"
     );
+    assert!(json["hooks"]["PostCompact"].is_array());
+    assert!(
+        json["hooks"]["AfterAgentResponse"].is_null(),
+        "AfterAgentResponse must not be injected — not part of the supported event surface"
+    );
+    assert!(
+        json["hooks"]["AfterAgentThought"].is_null(),
+        "AfterAgentThought must not be injected — not part of the supported event surface"
+    );
+    assert!(json["hooks"]["Stop"][0].get("matcher").is_none());
     assert!(
         json["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
@@ -361,8 +379,12 @@ fn generated_hook_dispatch_covers_all_agents() {
         assert!(generated_hooks(agent, "cmd")["hooks"].is_object());
     }
     assert_eq!(
-        hook_forward_command(CodingAgent::Hermes),
+        hook_forward_command("nemo-flow-sidecar", CodingAgent::Hermes),
         "nemo-flow-sidecar hook-forward hermes"
+    );
+    assert_eq!(
+        hook_forward_command("/abs/path/to/nemo-flow-sidecar", CodingAgent::Codex),
+        "/abs/path/to/nemo-flow-sidecar hook-forward codex"
     );
 }
 
