@@ -4,11 +4,67 @@
 use axum::http::HeaderMap;
 use nemo_flow::api::event::ScopeCategory;
 use nemo_flow::api::subscriber::{deregister_subscriber, register_subscriber};
+use nemo_flow::plugin::{PluginConfig, clear_plugin_configuration, initialize_plugins};
 use serde_json::json;
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use super::*;
-use crate::model::{LlmHintEvent, SessionEvent, ToolEvent};
+use crate::model::{LlmEvent, LlmHintEvent, SessionEvent, ToolEvent};
+
+static OBSERVABILITY_PLUGIN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn install_test_atif_plugin(output_directory: &Path) {
+    let _ = clear_plugin_configuration();
+    std::fs::create_dir_all(output_directory).unwrap();
+    let config: PluginConfig = serde_json::from_value(json!({
+        "version": 1,
+        "components": [
+            {
+                "kind": "observability",
+                "enabled": true,
+                "config": {
+                    "version": 1,
+                    "atif": {
+                        "enabled": true,
+                        "output_directory": output_directory,
+                        "filename_template": "trajectory-{session_id}.json"
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+    initialize_plugins(config).await.unwrap();
+}
+
+fn read_atif_for_session(output_directory: &Path, session_id: &str) -> Value {
+    std::fs::read_dir(output_directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            serde_json::from_slice::<Value>(&std::fs::read(entry.path()).ok()?).ok()
+        })
+        .find(|trajectory| atif_matches_session(trajectory, session_id))
+        .unwrap_or_else(|| panic!("expected ATIF trajectory for session {session_id}"))
+}
+
+fn atif_matches_session(trajectory: &Value, session_id: &str) -> bool {
+    trajectory["session_id"] == json!(session_id)
+        || trajectory["extra"]["observed_events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event_has_session_id(event, session_id))
+            })
+}
+
+fn event_has_session_id(event: &Value, session_id: &str) -> bool {
+    event["metadata"]["session_id"] == json!(session_id)
+        || event["data"]["session_id"] == json!(session_id)
+        || event["data"]["extra"]["session_id"] == json!(session_id)
+}
 
 #[tokio::test]
 async fn nests_agent_subagent_and_tool_lifecycle() {
@@ -82,6 +138,408 @@ async fn nests_agent_subagent_and_tool_lifecycle() {
     ];
     manager.apply_events(&headers, events).await.unwrap();
     assert!(manager.inner.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn writes_atif_on_session_end_from_plugin_config() {
+    let _guard = OBSERVABILITY_PLUGIN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let atif_dir = temp.path().join("atif");
+    install_test_atif_plugin(&atif_dir).await;
+    let config = GatewayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+
+        anthropic_base_url: "http://127.0.0.1".into(),
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-nemo-flow-session-metadata",
+        r#"{"team":"coverage"}"#.parse().unwrap(),
+    );
+    headers.insert("x-nemo-flow-gateway-mode", "required".parse().unwrap());
+
+    manager
+        .apply_events(
+            &headers,
+            vec![
+                NormalizedEvent::AgentStarted(SessionEvent {
+                    session_id: "atif-session".into(),
+                    agent_kind: AgentKind::Codex,
+                    event_name: "sessionStart".into(),
+                    payload: json!({ "start": true }),
+                    metadata: json!({ "agent": "codex" }),
+                }),
+                NormalizedEvent::PromptSubmitted(SessionEvent {
+                    session_id: "atif-session".into(),
+                    agent_kind: AgentKind::Codex,
+                    event_name: "UserPromptSubmit".into(),
+                    payload: json!({ "prompt": "hello" }),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::AgentEnded(SessionEvent {
+                    session_id: "atif-session".into(),
+                    agent_kind: AgentKind::Codex,
+                    event_name: "sessionEnd".into(),
+                    payload: json!({ "done": true }),
+                    metadata: json!({}),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+
+    clear_plugin_configuration().unwrap();
+    let atif = read_atif_for_session(&atif_dir, "atif-session");
+    assert!(
+        atif["extra"]["observed_events"]
+            .as_array()
+            .is_some_and(|events| events.len() >= 3)
+    );
+}
+
+#[tokio::test]
+async fn duplicate_agent_end_does_not_overwrite_atif_with_empty_session() {
+    // Regression test: hermes-agent and other integrations can emit terminal hooks more than once
+    // per session. Without idempotency in `end_agent`, the second AgentEnded would re-open an
+    // empty agent scope via `ensure_agent_started`, close it, and write an empty ATIF on top of
+    // the just-written real trajectory.
+    let _guard = OBSERVABILITY_PLUGIN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let atif_dir = temp.path().join("atif");
+    install_test_atif_plugin(&atif_dir).await;
+    let config = GatewayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+
+        anthropic_base_url: "http://127.0.0.1".into(),
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let headers = HeaderMap::new();
+
+    manager
+        .apply_events(
+            &headers,
+            vec![
+                NormalizedEvent::AgentStarted(SessionEvent {
+                    session_id: "dup-end".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SessionStart".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::PromptSubmitted(SessionEvent {
+                    session_id: "dup-end".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "UserPromptSubmit".into(),
+                    payload: json!({ "prompt": "hello" }),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::AgentEnded(SessionEvent {
+                    session_id: "dup-end".into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SessionEnd".into(),
+                    payload: json!({ "done": true }),
+                    metadata: json!({}),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let first = read_atif_for_session(&atif_dir, "dup-end");
+    let first_steps = first["steps"].as_array().unwrap().len();
+    assert!(
+        first_steps > 0,
+        "first AgentEnded should produce a non-empty ATIF"
+    );
+
+    // Second AgentEnded for the same session — must be a no-op, not overwrite with empty.
+    manager
+        .apply_events(
+            &headers,
+            vec![NormalizedEvent::AgentEnded(SessionEvent {
+                session_id: "dup-end".into(),
+                agent_kind: AgentKind::ClaudeCode,
+                event_name: "SessionEnd".into(),
+                payload: json!({ "done_again": true }),
+                metadata: json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+
+    clear_plugin_configuration().unwrap();
+    let second = read_atif_for_session(&atif_dir, "dup-end");
+    let second_steps = second["steps"].as_array().unwrap().len();
+    assert_eq!(
+        first_steps, second_steps,
+        "duplicate AgentEnded must not change the ATIF step count"
+    );
+}
+
+#[tokio::test]
+async fn writes_hermes_api_hook_usage_to_atif_metrics() {
+    let _guard = OBSERVABILITY_PLUGIN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let atif_dir = temp.path().join("atif");
+    install_test_atif_plugin(&atif_dir).await;
+    let config = GatewayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://127.0.0.1".into(),
+
+        anthropic_base_url: "http://127.0.0.1".into(),
+        metadata: None,
+        plugin_config: None,
+    };
+    let manager = SessionManager::new(config);
+    let headers = HeaderMap::new();
+
+    manager
+        .apply_events(
+            &headers,
+            vec![
+                NormalizedEvent::AgentStarted(SessionEvent {
+                    session_id: "hermes-usage".into(),
+                    agent_kind: AgentKind::Hermes,
+                    event_name: "on_session_start".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::LlmStarted(LlmEvent {
+                    session_id: "hermes-usage".into(),
+                    agent_kind: AgentKind::Hermes,
+                    event_name: "pre_api_request".into(),
+                    api_call_id: "hermes-usage:task-1:1".into(),
+                    provider: "custom".into(),
+                    model_name: Some("qwen".into()),
+                    request: json!({ "model": "qwen" }),
+                    response: Value::Null,
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::LlmEnded(LlmEvent {
+                    session_id: "hermes-usage".into(),
+                    agent_kind: AgentKind::Hermes,
+                    event_name: "post_api_request".into(),
+                    api_call_id: "hermes-usage:task-1:1".into(),
+                    provider: "custom".into(),
+                    model_name: Some("qwen".into()),
+                    request: json!({}),
+                    response: json!({
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 5,
+                            "prompt_tokens_details": { "cached_tokens": 3 }
+                        }
+                    }),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::AgentEnded(SessionEvent {
+                    session_id: "hermes-usage".into(),
+                    agent_kind: AgentKind::Hermes,
+                    event_name: "on_session_finalize".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+
+    clear_plugin_configuration().unwrap();
+    let atif = read_atif_for_session(&atif_dir, "hermes-usage");
+    assert_eq!(atif["steps"][1]["metrics"]["prompt_tokens"], json!(10));
+    assert_eq!(atif["steps"][1]["metrics"]["completion_tokens"], json!(5));
+    assert_eq!(atif["steps"][1]["metrics"]["cached_tokens"], json!(3));
+    assert_eq!(atif["final_metrics"]["total_prompt_tokens"], json!(10));
+    assert_eq!(atif["final_metrics"]["total_completion_tokens"], json!(5));
+    assert_eq!(atif["final_metrics"]["total_cached_tokens"], json!(3));
+}
+
+#[tokio::test]
+async fn hermes_turn_end_snapshots_atif_without_boundary_system_step() {
+    let _guard = OBSERVABILITY_PLUGIN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let atif_dir = temp.path().join("atif");
+    install_test_atif_plugin(&atif_dir).await;
+    let config = session_test_config();
+    let manager = SessionManager::new(config);
+    let headers = HeaderMap::new();
+
+    for payload in [
+        json!({
+            "hook_event_name": "on_session_start",
+            "session_id": "hermes-clean"
+        }),
+        json!({
+            "hook_event_name": "pre_api_request",
+            "session_id": "hermes-clean",
+            "extra": {
+                "task_id": "task-1",
+                "api_call_count": 1,
+                "provider": "custom",
+                "model": "qwen",
+                "request": {
+                    "method": "POST",
+                    "body": {
+                        "model": "qwen",
+                        "messages": [
+                            { "role": "user", "content": "hello" }
+                        ]
+                    }
+                }
+            }
+        }),
+        json!({
+            "hook_event_name": "post_api_request",
+            "session_id": "hermes-clean",
+            "extra": {
+                "task_id": "task-1",
+                "api_call_count": 1,
+                "provider": "custom",
+                "model": "qwen",
+                "response": {
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": "done"
+                    },
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5
+                    }
+                }
+            }
+        }),
+        json!({
+            "hook_event_name": "on_session_end",
+            "session_id": "hermes-clean"
+        }),
+    ] {
+        let outcome = crate::adapters::hermes::adapt(payload, &headers);
+        manager
+            .apply_events(&headers, outcome.events)
+            .await
+            .unwrap();
+    }
+
+    clear_plugin_configuration().unwrap();
+    let atif = read_atif_for_session(&atif_dir, "hermes-clean");
+    assert_eq!(atif["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(atif["steps"][0]["source"], json!("user"));
+    assert_eq!(atif["steps"][1]["source"], json!("agent"));
+    assert!(
+        atif["steps"].as_array().unwrap().iter().all(|step| {
+            step["source"] != json!("system")
+                || step["message"].as_object().is_some_and(|message| {
+                    !message.is_empty() && message.contains_key("hook_event_name")
+                })
+        }),
+        "Hermes hook system steps must not be anonymous or empty: {}",
+        serde_json::to_string_pretty(&atif["steps"]).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn hermes_orphan_subagent_stop_exports_readable_mark_with_lineage() {
+    let _guard = OBSERVABILITY_PLUGIN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let atif_dir = temp.path().join("atif");
+    install_test_atif_plugin(&atif_dir).await;
+    let config = session_test_config();
+    let manager = SessionManager::new(config);
+    let headers = HeaderMap::new();
+
+    for payload in [
+        json!({
+            "hook_event_name": "on_session_start",
+            "session_id": "hermes-orphan"
+        }),
+        json!({
+            "hook_event_name": "subagent_stop",
+            "session_id": "hermes-orphan",
+            "extra": {
+                "subagent_id": "worker-1",
+                "child_status": "completed"
+            }
+        }),
+        json!({
+            "hook_event_name": "on_session_finalize",
+            "session_id": "hermes-orphan"
+        }),
+    ] {
+        let outcome = crate::adapters::hermes::adapt(payload, &headers);
+        manager
+            .apply_events(&headers, outcome.events)
+            .await
+            .unwrap();
+    }
+
+    clear_plugin_configuration().unwrap();
+    let atif = read_atif_for_session(&atif_dir, "hermes-orphan");
+    let steps = atif["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["source"], json!("system"));
+    assert_eq!(
+        steps[0]["message"]["hook_event_name"],
+        json!("subagent_stop")
+    );
+    assert_eq!(
+        steps[0]["extra"]["ancestry"]["function_name"],
+        json!("subagent_end_without_start")
+    );
+    assert_eq!(
+        steps[0]["extra"]["ancestry"]["parent_name"],
+        json!("hermes")
+    );
+}
+
+#[tokio::test]
+async fn empty_hook_marks_do_not_create_empty_atif_steps() {
+    let _guard = OBSERVABILITY_PLUGIN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let atif_dir = temp.path().join("atif");
+    install_test_atif_plugin(&atif_dir).await;
+    let config = session_test_config();
+    let manager = SessionManager::new(config);
+
+    manager
+        .apply_events(
+            &HeaderMap::new(),
+            vec![
+                NormalizedEvent::AgentStarted(SessionEvent {
+                    session_id: "empty-mark".into(),
+                    agent_kind: AgentKind::Hermes,
+                    event_name: "on_session_start".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::HookMark(SessionEvent {
+                    session_id: "empty-mark".into(),
+                    agent_kind: AgentKind::Hermes,
+                    event_name: "unknown".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::AgentEnded(SessionEvent {
+                    session_id: "empty-mark".into(),
+                    agent_kind: AgentKind::Hermes,
+                    event_name: "on_session_finalize".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+
+    clear_plugin_configuration().unwrap();
+    let atif = read_atif_for_session(&atif_dir, "empty-mark");
+    assert!(atif["steps"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
