@@ -17,8 +17,24 @@ use crate::plugin::{
     lookup_plugin, register_plugin,
 };
 
+#[cfg(all(feature = "guardrails-remote", not(target_arch = "wasm32")))]
+#[path = "remote.rs"]
+mod remote;
+#[cfg(all(feature = "guardrails-remote", not(target_arch = "wasm32")))]
+use remote::register_remote_backend;
+
 /// The plugin kind reserved for the planned first-party component.
 pub const NEMO_GUARDRAILS_PLUGIN_KIND: &str = "nemo_guardrails";
+
+#[cfg(any(target_arch = "wasm32", not(feature = "guardrails-remote")))]
+fn register_remote_backend(
+    _config: NeMoGuardrailsConfig,
+    _ctx: &mut PluginRegistrationContext,
+) -> PluginResult<()> {
+    Err(PluginError::RegistrationFailed(
+        "built-in NeMo Guardrails remote backend is unavailable in this build".to_string(),
+    ))
+}
 
 /// Top-level NeMo Guardrails component wrapper.
 #[derive(Debug, Clone)]
@@ -182,6 +198,12 @@ pub struct RequestDefaultsConfig {
     /// Default context object passed into Guardrails requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Json>,
+    /// Default remote thread identifier for continuation-aware requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Default remote Guardrails state payload for continuation-aware requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Json>,
     /// Default request-time rail selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rails: Option<RequestRailsConfig>,
@@ -307,6 +329,8 @@ crate::editor_config! {
 crate::editor_config! {
     impl RequestDefaultsConfig {
         context => { label: "context", kind: Json, optional: true },
+        thread_id => { label: "thread_id", kind: String, optional: true },
+        state => { label: "state", kind: Json, optional: true },
         rails => {
             label: "rails",
             kind: Section,
@@ -349,13 +373,13 @@ impl Plugin for NeMoGuardrailsPlugin {
 
     fn register<'a>(
         &'a self,
-        _plugin_config: &Map<String, Json>,
-        _ctx: &'a mut PluginRegistrationContext,
+        plugin_config: &Map<String, Json>,
+        ctx: &'a mut PluginRegistrationContext,
     ) -> Pin<Box<dyn Future<Output = PluginResult<()>> + Send + 'a>> {
-        Box::pin(async {
-            Err(PluginError::RegistrationFailed(
-                "built-in NeMo Guardrails plugin backend is not implemented yet".to_string(),
-            ))
+        let parsed = parse_nemo_guardrails_config(plugin_config);
+        Box::pin(async move {
+            let config = parsed?;
+            register_nemo_guardrails_backend(config, ctx)
         })
     }
 }
@@ -417,6 +441,21 @@ fn string_enum_schema(
         schema.metadata().default = Some(Json::String(default.into()));
     }
     schema.into()
+}
+
+fn register_nemo_guardrails_backend(
+    config: NeMoGuardrailsConfig,
+    ctx: &mut PluginRegistrationContext,
+) -> PluginResult<()> {
+    match config.mode.as_str() {
+        "remote" => register_remote_backend(config, ctx),
+        "local" => Err(PluginError::RegistrationFailed(
+            "built-in NeMo Guardrails local backend is not implemented yet".to_string(),
+        )),
+        other => Err(PluginError::InvalidConfig(format!(
+            "unsupported NeMo Guardrails mode '{other}'"
+        ))),
+    }
 }
 
 fn parse_nemo_guardrails_config(
@@ -497,6 +536,8 @@ fn validate_nemo_guardrails_plugin_config(
         "request_defaults",
         &[
             "context",
+            "thread_id",
+            "state",
             "rails",
             "llm_params",
             "llm_output",
@@ -526,6 +567,7 @@ fn validate_nemo_guardrails_plugin_config(
     validate_config_shape(&mut diagnostics, &config.policy, &config);
     validate_codec_requirements(&mut diagnostics, &config.policy, &config);
     validate_surface_selection(&mut diagnostics, &config.policy, &config);
+    validate_remote_backend_support(&mut diagnostics, &config.policy, &config);
     validate_request_defaults(&mut diagnostics, &config.policy, &config);
 
     diagnostics
@@ -869,6 +911,43 @@ fn validate_surface_selection(
     );
 }
 
+fn validate_remote_backend_support(
+    diagnostics: &mut Vec<ConfigDiagnostic>,
+    policy: &ConfigPolicy,
+    config: &NeMoGuardrailsConfig,
+) {
+    if config.mode != "remote" {
+        return;
+    }
+
+    if (config.input || config.output)
+        && config
+            .codec
+            .as_deref()
+            .is_some_and(|codec| codec != "openai_chat")
+    {
+        push_policy_diag(
+            diagnostics,
+            policy.unsupported_value,
+            "nemo_guardrails.unsupported_value",
+            Some(NEMO_GUARDRAILS_PLUGIN_KIND.to_string()),
+            Some("codec".to_string()),
+            "remote mode currently supports only codec = 'openai_chat'".to_string(),
+        );
+    }
+
+    if config.tool_input {
+        push_policy_diag(
+            diagnostics,
+            policy.unsupported_value,
+            "nemo_guardrails.unsupported_value",
+            Some(NEMO_GUARDRAILS_PLUGIN_KIND.to_string()),
+            Some("tool_input".to_string()),
+            "remote mode does not currently support managed tool_input against the stock Guardrails remote contract".to_string(),
+        );
+    }
+}
+
 fn validate_request_defaults(
     diagnostics: &mut Vec<ConfigDiagnostic>,
     policy: &ConfigPolicy,
@@ -885,6 +964,54 @@ fn validate_request_defaults(
         "request_defaults.context",
         "request_defaults.context must be a JSON object",
     );
+    if let Some(thread_id) = &request_defaults.thread_id {
+        let trimmed_thread_id = thread_id.trim();
+        if trimmed_thread_id.is_empty() {
+            push_policy_diag(
+                diagnostics,
+                policy.unsupported_value,
+                "nemo_guardrails.unsupported_value",
+                Some(NEMO_GUARDRAILS_PLUGIN_KIND.to_string()),
+                Some("request_defaults.thread_id".to_string()),
+                "request_defaults.thread_id must not be empty".to_string(),
+            );
+        } else if trimmed_thread_id.len() < 16 {
+            push_policy_diag(
+                diagnostics,
+                policy.unsupported_value,
+                "nemo_guardrails.unsupported_value",
+                Some(NEMO_GUARDRAILS_PLUGIN_KIND.to_string()),
+                Some("request_defaults.thread_id".to_string()),
+                "request_defaults.thread_id must be at least 16 characters long".to_string(),
+            );
+        }
+    }
+    validate_json_object_field(
+        diagnostics,
+        policy,
+        request_defaults.state.as_ref(),
+        "request_defaults.state",
+        "request_defaults.state must be a JSON object",
+    );
+    if let Some(state) = request_defaults
+        .state
+        .as_ref()
+        .and_then(|value| value.as_object())
+    {
+        let contains_supported_key = state.contains_key("events") || state.contains_key("state");
+        let contains_unsupported_key = state.keys().any(|key| key != "events" && key != "state");
+        if (!state.is_empty() && !contains_supported_key) || contains_unsupported_key {
+            push_policy_diag(
+                diagnostics,
+                policy.unsupported_value,
+                "nemo_guardrails.unsupported_value",
+                Some(NEMO_GUARDRAILS_PLUGIN_KIND.to_string()),
+                Some("request_defaults.state".to_string()),
+                "request_defaults.state must be empty or contain only 'events' or 'state'"
+                    .to_string(),
+            );
+        }
+    }
     validate_json_object_field(
         diagnostics,
         policy,
@@ -1138,5 +1265,5 @@ fn default_timeout_millis() -> u64 {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/plugins/nemo_guardrails/plugin_component_tests.rs"]
+#[path = "../../../tests/unit/plugins/nemo_guardrails/component_tests.rs"]
 mod tests;

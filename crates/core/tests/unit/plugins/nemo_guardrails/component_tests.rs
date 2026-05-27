@@ -2,10 +2,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Unit tests for the planned NeMo Guardrails plugin component contract.
+#![allow(clippy::await_holding_lock)]
 
 use super::*;
 use crate::api::runtime::NemoRelayContextState;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::Duration;
+
+use crate::api::event::Event;
+use crate::api::llm::{
+    LlmAttributes, LlmCallExecuteParams, LlmRequest, LlmStreamCallExecuteParams, llm_call_execute,
+    llm_stream_call_execute,
+};
 use crate::api::runtime::global_context;
+use crate::api::runtime::{
+    LlmExecutionNextFn, LlmJsonStream, LlmStreamExecutionNextFn, create_scope_stack,
+    set_thread_scope_stack,
+};
+use crate::api::subscriber::{deregister_subscriber, register_subscriber};
+use crate::api::tool::{ToolCallExecuteParams, tool_call_execute};
+use crate::codec::openai_chat::{OpenAIChatCodec, OpenAIChatStreamingCodec};
+use crate::codec::streaming::StreamingCodec;
+use crate::codec::traits::LlmResponseCodec;
 use crate::config_editor::{EditorConfig, EditorFieldKind};
 #[cfg(feature = "schema")]
 use crate::plugin::plugin_config_schema;
@@ -13,18 +35,21 @@ use crate::plugin::{
     PluginComponentSpec, PluginConfig, clear_plugin_configuration, initialize_plugins,
     list_plugin_kinds, lookup_plugin, validate_plugin_config,
 };
+use futures::StreamExt;
 use serde_json::json;
+
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn reset_runtime() {
     let _ = clear_plugin_configuration();
-    let _ = deregister_nemo_guardrails_component();
     crate::shared_runtime::reset_runtime_owner_for_tests();
     let context = global_context();
     *context.write().unwrap() = NemoRelayContextState::new();
 }
 
-fn ensure_registered() {
-    register_nemo_guardrails_component().unwrap();
+fn setup_isolated_thread() {
+    let stack = create_scope_stack();
+    set_thread_scope_stack(stack);
 }
 
 fn component(config: Json) -> PluginComponentSpec {
@@ -66,6 +91,128 @@ fn remote_valid_config() -> Json {
             "config_id": "safety-default"
         }
     })
+}
+
+#[derive(Debug)]
+struct CapturedHttpRequest {
+    path: String,
+    content_type: String,
+    body: Vec<u8>,
+}
+
+fn spawn_http_responder(
+    listener: TcpListener,
+    response: Vec<u8>,
+    request_tx: mpsc::Sender<CapturedHttpRequest>,
+) {
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        stream.write_all(&response).unwrap();
+        request_tx.send(request).unwrap();
+    });
+}
+
+fn read_http_request(stream: &mut impl Read) -> CapturedHttpRequest {
+    let mut bytes = Vec::new();
+    let mut buf = [0_u8; 4096];
+    let (header_end, content_length) = read_http_headers(stream, &mut bytes, &mut buf);
+    read_http_body(stream, &mut bytes, &mut buf, header_end + content_length);
+
+    let headers_text = String::from_utf8_lossy(&bytes[..header_end]);
+    let request_line = headers_text.lines().next().unwrap();
+    CapturedHttpRequest {
+        path: request_line.split_whitespace().nth(1).unwrap().to_string(),
+        content_type: header_value(&headers_text, "content-type")
+            .unwrap_or_default()
+            .to_string(),
+        body: bytes[header_end..header_end + content_length].to_vec(),
+    }
+}
+
+fn read_http_headers(
+    stream: &mut impl Read,
+    bytes: &mut Vec<u8>,
+    buf: &mut [u8; 4096],
+) -> (usize, usize) {
+    loop {
+        let read = stream.read(buf).unwrap();
+        if read == 0 {
+            panic!("remote responder closed before receiving request");
+        }
+        bytes.extend_from_slice(&buf[..read]);
+
+        if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let header_end = header_end + 4;
+            let headers_text = String::from_utf8_lossy(&bytes[..header_end]);
+            let content_length = header_value(&headers_text, "content-length")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            return (header_end, content_length);
+        }
+    }
+}
+
+fn read_http_body(
+    stream: &mut impl Read,
+    bytes: &mut Vec<u8>,
+    buf: &mut [u8; 4096],
+    expected_total: usize,
+) {
+    while bytes.len() < expected_total {
+        let read = stream.read(buf).unwrap();
+        if read == 0 {
+            panic!("remote responder closed before full request body");
+        }
+        bytes.extend_from_slice(&buf[..read]);
+    }
+}
+
+fn header_value<'a>(headers_text: &'a str, header_name: &str) -> Option<&'a str> {
+    headers_text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case(header_name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn recv_captured_request(request_rx: &mpsc::Receiver<CapturedHttpRequest>) -> CapturedHttpRequest {
+    request_rx
+        .recv_timeout(TEST_TIMEOUT)
+        .expect("timed out waiting for captured HTTP request")
+}
+
+fn make_chat_request(stream: bool) -> LlmRequest {
+    LlmRequest {
+        headers: serde_json::Map::new(),
+        content: json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 0.2,
+            "stream": stream
+        }),
+    }
+}
+
+fn capture_events(name: &str) -> Arc<Mutex<Vec<Event>>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    register_subscriber(
+        name,
+        Arc::new(move |event| sink.lock().unwrap().push(event.clone())),
+    )
+    .unwrap();
+    events
+}
+
+fn unused_local_endpoint() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{address}")
 }
 
 #[test]
@@ -210,6 +357,8 @@ fn schema_contains_every_supported_nemo_guardrails_option() {
         "timeout_millis",
         "python_module",
         "context",
+        "thread_id",
+        "state",
         "rails",
         "llm_params",
         "llm_output",
@@ -264,23 +413,14 @@ fn plugin_schema_contains_generic_plugin_surface() {
 }
 
 #[test]
-fn registration_is_explicit_not_automatic() {
+fn builtin_registration_is_automatic() {
     let _guard = crate::plugins::nemo_guardrails::test_mutex()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     reset_runtime();
 
-    assert!(!list_plugin_kinds().contains(&NEMO_GUARDRAILS_PLUGIN_KIND.to_string()));
-    assert!(lookup_plugin(NEMO_GUARDRAILS_PLUGIN_KIND).is_none());
-
-    ensure_registered();
     assert!(list_plugin_kinds().contains(&NEMO_GUARDRAILS_PLUGIN_KIND.to_string()));
     assert!(lookup_plugin(NEMO_GUARDRAILS_PLUGIN_KIND).is_some());
-
-    ensure_registered();
-    assert!(lookup_plugin(NEMO_GUARDRAILS_PLUGIN_KIND).is_some());
-    assert!(deregister_nemo_guardrails_component());
-    assert!(!deregister_nemo_guardrails_component());
 }
 
 #[test]
@@ -289,7 +429,6 @@ fn disabled_component_validates_and_initializes_without_runtime_work() {
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     reset_runtime();
-    ensure_registered();
 
     let config = PluginConfig {
         version: 1,
@@ -306,7 +445,6 @@ fn duplicate_component_is_rejected_as_singleton() {
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     reset_runtime();
-    ensure_registered();
 
     let config = PluginConfig {
         version: 1,
@@ -332,7 +470,6 @@ fn invalid_shapes_and_values_are_reported() {
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     reset_runtime();
-    ensure_registered();
 
     let invalid_shape = validate_plugin_config(&plugin_config(json!({
         "version": "one",
@@ -423,6 +560,72 @@ fn invalid_shapes_and_values_are_reported() {
         diag.message
             .contains("codec must be 'openai_chat', 'openai_responses', or 'anthropic_messages'")
     }));
+
+    let unsupported_remote_codec = validate_plugin_config(&plugin_config(json!({
+        "mode": "remote",
+        "codec": "openai_responses",
+        "remote": {
+            "endpoint": "http://localhost:8000",
+            "config_id": "default"
+        }
+    })));
+    assert!(unsupported_remote_codec.has_errors());
+    assert!(unsupported_remote_codec.diagnostics.iter().any(|diag| {
+        diag.message
+            .contains("remote mode currently supports only codec = 'openai_chat'")
+    }));
+
+    let unsupported_remote_anthropic_codec = validate_plugin_config(&plugin_config(json!({
+        "mode": "remote",
+        "codec": "anthropic_messages",
+        "remote": {
+            "endpoint": "http://localhost:8000",
+            "config_id": "default"
+        }
+    })));
+    assert!(unsupported_remote_anthropic_codec.has_errors());
+    assert!(
+        unsupported_remote_anthropic_codec
+            .diagnostics
+            .iter()
+            .any(|diag| {
+                diag.message
+                    .contains("remote mode currently supports only codec = 'openai_chat'")
+            })
+    );
+
+    let unsupported_remote_tool_input = validate_plugin_config(&plugin_config(json!({
+        "mode": "remote",
+        "codec": "openai_chat",
+        "tool_input": true,
+        "remote": {
+            "endpoint": "http://localhost:8000",
+            "config_id": "default"
+        }
+    })));
+    assert!(unsupported_remote_tool_input.has_errors());
+    assert!(
+        unsupported_remote_tool_input
+            .diagnostics
+            .iter()
+            .any(|diag| {
+                diag.field.as_deref() == Some("tool_input")
+                    && diag
+                        .message
+                        .contains("does not currently support managed tool_input")
+            })
+    );
+
+    let supported_remote_tool_output = validate_plugin_config(&plugin_config(json!({
+        "mode": "remote",
+        "codec": "openai_chat",
+        "tool_output": true,
+        "remote": {
+            "endpoint": "http://localhost:8000",
+            "config_id": "default"
+        }
+    })));
+    assert!(!supported_remote_tool_output.has_errors());
 
     let remote_empty_fields = validate_plugin_config(&plugin_config(json!({
         "mode": "remote",
@@ -527,6 +730,8 @@ fn invalid_shapes_and_values_are_reported() {
         },
         "request_defaults": {
             "context": true,
+            "thread_id": "short",
+            "state": {"foo": "bar"},
             "llm_params": [],
             "log": "verbose",
             "output_vars": 7,
@@ -542,6 +747,26 @@ fn invalid_shapes_and_values_are_reported() {
             .iter()
             .any(|diag| diag.field.as_deref() == Some("request_defaults.context"))
     );
+    assert!(
+        invalid_request_defaults
+            .diagnostics
+            .iter()
+            .any(|diag| diag.field.as_deref() == Some("request_defaults.thread_id"))
+    );
+    assert!(invalid_request_defaults.diagnostics.iter().any(|diag| {
+        diag.message
+            .contains("request_defaults.thread_id must be at least 16 characters long")
+    }));
+    assert!(
+        invalid_request_defaults
+            .diagnostics
+            .iter()
+            .any(|diag| diag.field.as_deref() == Some("request_defaults.state"))
+    );
+    assert!(invalid_request_defaults.diagnostics.iter().any(|diag| {
+        diag.message
+            .contains("request_defaults.state must be empty or contain only 'events' or 'state'")
+    }));
     assert!(
         invalid_request_defaults
             .diagnostics
@@ -574,7 +799,6 @@ fn unknown_fields_follow_policy() {
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     reset_runtime();
-    ensure_registered();
 
     let warn_report = validate_plugin_config(&plugin_config(json!({
         "mode": "remote",
@@ -618,21 +842,26 @@ fn unknown_fields_follow_policy() {
 }
 
 #[test]
-fn enabled_initialization_fails_fast_until_backend_exists() {
+fn enabled_local_initialization_fails_fast_until_backend_exists() {
     let _guard = crate::plugins::nemo_guardrails::test_mutex()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     reset_runtime();
-    ensure_registered();
 
-    let error =
-        futures::executor::block_on(initialize_plugins(plugin_config(remote_valid_config())))
-            .unwrap_err();
+    let error = futures::executor::block_on(initialize_plugins(plugin_config(json!({
+        "mode": "local",
+        "codec": "openai_chat",
+        "config_path": "./rails"
+    }))))
+    .unwrap_err();
 
     match error {
         crate::plugin::PluginError::RegistrationFailed(message) => {
-            assert!(message.contains("not implemented yet"));
+            assert!(message.contains("local backend"));
         }
         other => panic!("unexpected error: {other}"),
     }
 }
+
+#[path = "remote_tests.rs"]
+mod remote_tests;
