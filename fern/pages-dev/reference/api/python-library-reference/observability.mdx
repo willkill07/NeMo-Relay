@@ -4,6 +4,9 @@ sidebar-title: "observability"
 description: "Observability plugin configuration helpers."
 position: 8
 ---
+{/* SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0 */}
+
 Generated from `python/nemo_relay/observability.pyi`.
 
 Module `nemo_relay.observability`.
@@ -39,6 +42,20 @@ def to_dict() -> JsonObject
 ```
 
 Serialize this ATOF config to the canonical JSON object shape.
+
+### `S3StorageConfig`
+
+S3-compatible remote storage settings for ATIF trajectory upload.
+
+#### Methods
+
+##### `to_dict`
+
+```python
+def to_dict() -> JsonObject
+```
+
+Serialize this S3 storage config to the canonical JSON object shape.
 
 ### `AtifConfig`
 

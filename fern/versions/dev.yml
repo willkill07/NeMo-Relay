@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 navigation:
-- folder: ../pages-dev/about
-  title: About NeMo Relay
+- folder: ../pages-dev/about-nemo-relay
+  title: About NVIDIA NeMo Relay
   slug: about-nemo-relay
   title-source: frontmatter
 - folder: ../pages-dev/getting-started
@@ -11,10 +11,10 @@ navigation:
   slug: getting-started
   title-source: frontmatter
 - folder: ../pages-dev/nemo-relay-cli
-  title: NeMo Relay CLI
+  title: NVIDIA NeMo Relay CLI
   slug: nemo-relay-cli
   title-source: frontmatter
-- folder: ../pages-dev/integrations
+- folder: ../pages-dev/supported-integrations
   title: Supported Integrations
   slug: supported-integrations
   title-source: frontmatter
@@ -22,15 +22,19 @@ navigation:
   title: Instrument Applications
   slug: instrument-applications
   title-source: frontmatter
-- folder: ../pages-dev/plugins/observability
+- folder: ../pages-dev/observability-plugin
   title: Observability Plugin
   slug: observability-plugin
   title-source: frontmatter
-- folder: ../pages-dev/plugins/adaptive
+- folder: ../pages-dev/adaptive-plugin
   title: Adaptive Plugin
   slug: adaptive-plugin
   title-source: frontmatter
-- folder: ../pages-dev/integrate-frameworks
+- folder: ../pages-dev/nemo-guardrails-plugin
+  title: NeMo Guardrails Plugin
+  slug: nemo-guardrails-plugin
+  title-source: frontmatter
+- folder: ../pages-dev/integrate-into-frameworks
   title: Integrate into Frameworks
   slug: integrate-into-frameworks
   title-source: frontmatter

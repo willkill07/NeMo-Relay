@@ -14,15 +14,23 @@ Documentation is authored on `main`:
 
 - `docs/` contains the Markdown and MDX page source.
 - `docs/index.yml` contains the source navigation tree.
-- `fern/` contains local Fern configuration, shared assets, custom components,
-  and site styling.
+- `fern/` contains local Fern configuration, shared assets, and custom
+  components.
 
-The `docs-website` branch is CI-managed. Do not edit it by hand. The
-`.github/workflows/fern-docs.yml` workflow syncs the authored docs into this
+The `docs-website` branch is mostly CI-managed. Do not hand-edit generated Fern
+content on that branch. The root `.gitignore`, `README.md`, and
+`.github/workflows/publish-fern-docs.yml` are branch-local files that can be
+updated directly on `docs-website` when the branch maintenance guidance,
+ignored-file rules, or manual fallback workflow changes.
+
+The `.github/workflows/fern-docs.yml` workflow syncs the authored docs into this
 published layout:
 
 - `.github/workflows/publish-fern-docs.yml` contains the branch-local publish
   workflow for manual dispatch or direct branch pushes.
+- `.gitignore` keeps source-branch and local tooling files from appearing as
+  untracked noise when `docs-website` is checked out.
+- `README.md` contains branch-local maintenance guidance.
 - `fern/pages-dev/` contains the generated dev documentation pages.
 - `fern/versions/dev.yml` contains the dev navigation rewritten for the
   published branch layout.
@@ -30,19 +38,20 @@ published layout:
   from release tags.
 - `fern/docs.yml` preserves the version list accumulated on `docs-website`.
 
-The branch intentionally contains only the Fern publish surface and the
-branch-local workflow. Generator support directories such as `_generated/` and
-`_source/` are excluded from the published branch. The sync is implemented by
-`scripts/docs/sync_fern_docs_branch.py` so the branch layout can be validated
-outside GitHub Actions.
+The branch intentionally contains only the Fern publish surface plus the
+branch-local `.gitignore`, README, and workflow. Generator support directories such as
+`_generated/` and `_source/` are excluded from the published branch. The sync is
+implemented by `scripts/docs/sync_fern_docs_branch.py` so the generated branch
+layout can be validated outside GitHub Actions.
 
 ## Publishing
 
-The Fern publish workflow uses the GitHub secret `DOCS_FERN_TOKEN` and passes it
-to the Fern CLI as `FERN_TOKEN`.
+The Fern publish workflow uses the `FERN_TOKEN` GitHub environment secret from
+the `fern` environment and passes it to the Fern CLI as `FERN_TOKEN`.
 
-- Pushes to `pull-request/**` that affect docs generate a Fern preview and add
-  the preview URL to the pull request.
+- Pushes to `pull-request/**` that affect docs generate a stable Fern preview
+  and add the preview URL to the pull request. When the pull request is merged,
+  the workflow deletes the matching preview deployment.
 - Pushes to `main` that affect docs regenerate API reference pages, sync
   `docs-website`, and publish the dev docs.
 - Raw SemVer tags such as `0.1.0`, `0.1.0-beta.1`, and `0.1.0-rc.1` create or
