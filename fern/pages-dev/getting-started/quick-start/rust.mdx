@@ -18,8 +18,8 @@ local checkout.
 Use the published crates when you are consuming a release:
 
 ```bash
-cargo add nemo-relay@0.3.0
-cargo add nemo-relay-adaptive@0.3.0
+cargo add nemo-relay@0.4.0
+cargo add nemo-relay-adaptive@0.4.0
 cargo add serde_json
 ```
 
@@ -27,7 +27,7 @@ Install the published NeMo Relay CLI separately when you need coding-agent hook
 and LLM gateway observability:
 
 ```bash
-cargo install nemo-relay-cli@0.3.0
+cargo install nemo-relay-cli@0.4.0
 ```
 
 ### Install from the Repository
@@ -43,7 +43,7 @@ serde_json = "1"
 
 - `nemo-relay` is the core Rust runtime surface.
 - `nemo-relay-adaptive` is the companion crate for adaptive runtime primitives and Redis-backed learning components.
-- `nemo-relay-cli` is a binary crate. Use `cargo install nemo-relay-cli@0.3.0` when
+- `nemo-relay-cli` is a binary crate. Use `cargo install nemo-relay-cli@0.4.0` when
   you need the NeMo Relay CLI.
 
 ## Push a Scope and Emit a Mark
@@ -54,7 +54,7 @@ The example below creates a scope and records a mark event from Rust.
 use nemo_relay::api::scope::{
     self, EmitMarkEventParams, PopScopeParams, PushScopeParams, ScopeAttributes, ScopeType,
 };
-use nemo_relay::api::subscriber::{deregister_subscriber, register_subscriber};
+use nemo_relay::api::subscriber::{deregister_subscriber, flush_subscribers, register_subscriber};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -83,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build(),
     )?;
     scope::pop_scope(PopScopeParams::builder().handle_uuid(&handle.uuid).build())?;
+    flush_subscribers()?;
     let _ = deregister_subscriber("quickstart-printer")?;
     Ok(())
 }
@@ -91,6 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## What Success Looks Like
 
 The script should exit cleanly and print lifecycle lines from the subscriber.
+Native subscriber delivery is asynchronous, so examples flush before checking
+subscriber output.
 You should see one line for the scope start event, one for the `initialized`
 mark, and one for the scope end event.
 
