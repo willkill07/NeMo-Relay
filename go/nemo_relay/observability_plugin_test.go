@@ -42,21 +42,34 @@ func TestObservabilityConfigHelpers(t *testing.T) {
 		t.Fatalf("unexpected ATIF defaults: %#v", atif)
 	}
 	allowHTTP := false
+	s3Storage := NewObservabilityS3StorageConfig("archive")
+	s3Storage.KeyPrefix = "runs/"
+	s3Storage.AccessKeyID = "test-access-key"
+	s3Storage.SecretAccessKeyVar = "NEMO_RELAY_TEST_SECRET"
+	s3Storage.Region = "us-west-2"
+	s3Storage.AllowHTTP = &allowHTTP
+	httpStorage := NewObservabilityHttpStorageConfig("https://example.com/atif")
+	httpStorage.Headers = map[string]string{"x-static": "value"}
+	httpStorage.HeaderEnv = map[string]string{"authorization": "NEMO_RELAY_ATIF_HTTP_AUTH"}
+	httpStorage.TimeoutMillis = 1500
+	if s3Storage.Bucket != "archive" ||
+		s3Storage.KeyPrefix != "runs/" ||
+		s3Storage.AccessKeyID != "test-access-key" ||
+		s3Storage.SecretAccessKeyVar != "NEMO_RELAY_TEST_SECRET" ||
+		s3Storage.Region != "us-west-2" ||
+		s3Storage.AllowHTTP == nil ||
+		*s3Storage.AllowHTTP {
+		t.Fatalf("unexpected S3 constructor values: %#v", s3Storage)
+	}
+	if httpStorage.Endpoint != "https://example.com/atif" ||
+		httpStorage.Headers["x-static"] != "value" ||
+		httpStorage.HeaderEnv["authorization"] != "NEMO_RELAY_ATIF_HTTP_AUTH" ||
+		httpStorage.TimeoutMillis != 1500 {
+		t.Fatalf("unexpected HTTP constructor values: %#v", httpStorage)
+	}
 	atif.Storage = []ObservabilityAtifStorageConfig{
-		ObservabilityS3StorageConfig{
-			Bucket:             "archive",
-			KeyPrefix:          "runs/",
-			AccessKeyID:        "test-access-key",
-			SecretAccessKeyVar: "NEMO_RELAY_TEST_SECRET",
-			Region:             "us-west-2",
-			AllowHTTP:          &allowHTTP,
-		},
-		ObservabilityHttpStorageConfig{
-			Endpoint:      "https://example.com/atif",
-			Headers:       map[string]string{"x-static": "value"},
-			HeaderEnv:     map[string]string{"authorization": "NEMO_RELAY_ATIF_HTTP_AUTH"},
-			TimeoutMillis: 1500,
-		},
+		s3Storage,
+		httpStorage,
 	}
 	otlp := NewObservabilityOtlpConfig()
 	if otlp.Enabled || otlp.Transport != "http_binary" || otlp.ServiceName != "nemo-relay" || otlp.TimeoutMillis != 3000 {

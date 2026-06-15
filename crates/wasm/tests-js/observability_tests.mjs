@@ -50,6 +50,12 @@ test('WebAssembly observability wrappers pass through ATIF remote storage config
   });
 
   assert.deepEqual(config.storage, [s3, http]);
+
+  const singleConfig = observability.atifConfig({
+    enabled: true,
+    storage: s3,
+  });
+  assert.deepEqual(singleConfig.storage, s3);
 });
 
 test('WebAssembly observability wrappers build component specs and validate file sinks', () => {
