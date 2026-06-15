@@ -67,6 +67,26 @@ func TestObservabilityConfigHelpers(t *testing.T) {
 		httpStorage.TimeoutMillis != 1500 {
 		t.Fatalf("unexpected HTTP constructor values: %#v", httpStorage)
 	}
+	s3Serialized := marshalStorageConfig(t, s3Storage)
+	if s3Serialized["type"] != "s3" ||
+		s3Serialized["bucket"] != "archive" ||
+		s3Serialized["key_prefix"] != "runs/" ||
+		s3Serialized["access_key_id"] != "test-access-key" ||
+		s3Serialized["secret_access_key_var"] != "NEMO_RELAY_TEST_SECRET" ||
+		s3Serialized["region"] != "us-west-2" ||
+		s3Serialized["allow_http"] != false {
+		t.Fatalf("unexpected serialized S3 storage config: %#v", s3Serialized)
+	}
+	httpSerialized := marshalStorageConfig(t, httpStorage)
+	httpHeaders := httpSerialized["headers"].(map[string]any)
+	httpHeaderEnv := httpSerialized["header_env"].(map[string]any)
+	if httpSerialized["type"] != "http" ||
+		httpSerialized["endpoint"] != "https://example.com/atif" ||
+		httpSerialized["timeout_millis"] != float64(1500) ||
+		httpHeaders["x-static"] != "value" ||
+		httpHeaderEnv["authorization"] != "NEMO_RELAY_ATIF_HTTP_AUTH" {
+		t.Fatalf("unexpected serialized HTTP storage config: %#v", httpSerialized)
+	}
 	atif.Storage = []ObservabilityAtifStorageConfig{
 		s3Storage,
 		httpStorage,
@@ -102,6 +122,19 @@ func TestObservabilityConfigHelpers(t *testing.T) {
 	if http["type"] != "http" || http["endpoint"] != "https://example.com/atif" || http["timeout_millis"] != float64(1500) {
 		t.Fatalf("unexpected HTTP storage config: %#v", http)
 	}
+}
+
+func marshalStorageConfig(t *testing.T, config ObservabilityAtifStorageConfig) map[string]any {
+	t.Helper()
+	payload, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("marshal storage config: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		t.Fatalf("unmarshal storage config: %v", err)
+	}
+	return parsed
 }
 
 func TestObservabilityPluginAtofAndAtifFiles(t *testing.T) {
