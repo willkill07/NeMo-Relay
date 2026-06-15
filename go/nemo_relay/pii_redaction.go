@@ -50,6 +50,7 @@ type PiiRedactionComponentSpec struct {
 
 // NewPiiRedactionConfig returns a default PII redaction config with version 1.
 func NewPiiRedactionConfig() PiiRedactionConfig {
+	builtin := NewPiiRedactionBuiltinConfig()
 	return PiiRedactionConfig{
 		Version:    1,
 		Mode:       "builtin",
@@ -58,6 +59,7 @@ func NewPiiRedactionConfig() PiiRedactionConfig {
 		ToolInput:  true,
 		ToolOutput: true,
 		Priority:   100,
+		Builtin:    &builtin,
 	}
 }
 
