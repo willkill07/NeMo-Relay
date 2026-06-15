@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from nemo_relay import plugin
 from nemo_relay.pricing import (
     PRICING_PLUGIN_KIND,
@@ -23,7 +25,8 @@ from nemo_relay.pricing import (
 
 
 class TestPricingConfigHelpers:
-    def test_defaults_and_component_wrapper(self):
+    def test_defaults_and_component_wrapper(self, tmp_path: Path):
+        pricing_file = tmp_path / "pricing.json"
         rates = TokenPricingRates(1.0, 2.0, cache_read_per_million=0.25)
         entry = ModelPricing(
             provider="test",
@@ -35,7 +38,7 @@ class TestPricingConfigHelpers:
         config = PricingConfig(
             sources=[
                 InlineSource(PricingCatalog(entries=[entry])),
-                FileSource("/tmp/pricing.json"),
+                FileSource(str(pricing_file)),
             ]
         )
 
@@ -50,7 +53,7 @@ class TestPricingConfigHelpers:
         assert wrapped_config["sources"][0]["type"] == "inline"
         assert wrapped_config["sources"][1] == {
             "type": "file",
-            "path": "/tmp/pricing.json",
+            "path": str(pricing_file),
         }
 
     def test_rate_schedule_serialization(self):
