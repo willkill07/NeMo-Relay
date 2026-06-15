@@ -3,6 +3,8 @@
 
 package nemo_relay
 
+import "encoding/json"
+
 // ObservabilityPluginKind is the top-level plugin kind used by the core observability component.
 const ObservabilityPluginKind = "observability"
 
@@ -35,14 +37,88 @@ type ObservabilityAtofEndpoint struct {
 
 // ObservabilityAtifConfig configures per-top-level-agent ATIF file export.
 type ObservabilityAtifConfig struct {
-	Enabled          bool             `json:"enabled,omitempty"`
-	AgentName        string           `json:"agent_name,omitempty"`
-	AgentVersion     string           `json:"agent_version,omitempty"`
-	ModelName        string           `json:"model_name,omitempty"`
-	ToolDefinitions  []map[string]any `json:"tool_definitions,omitempty"`
-	Extra            map[string]any   `json:"extra,omitempty"`
-	OutputDirectory  string           `json:"output_directory,omitempty"`
-	FilenameTemplate string           `json:"filename_template,omitempty"`
+	Enabled          bool                             `json:"enabled,omitempty"`
+	AgentName        string                           `json:"agent_name,omitempty"`
+	AgentVersion     string                           `json:"agent_version,omitempty"`
+	ModelName        string                           `json:"model_name,omitempty"`
+	ToolDefinitions  []map[string]any                 `json:"tool_definitions,omitempty"`
+	Extra            map[string]any                   `json:"extra,omitempty"`
+	OutputDirectory  string                           `json:"output_directory,omitempty"`
+	FilenameTemplate string                           `json:"filename_template,omitempty"`
+	Storage          []ObservabilityAtifStorageConfig `json:"storage,omitempty"`
+}
+
+// ObservabilityAtifStorageConfig is one remote ATIF trajectory storage destination.
+type ObservabilityAtifStorageConfig interface {
+	atifStorageConfig()
+}
+
+// ObservabilityS3StorageConfig configures S3-compatible ATIF trajectory upload.
+type ObservabilityS3StorageConfig struct {
+	Bucket             string `json:"bucket"`
+	KeyPrefix          string `json:"key_prefix,omitempty"`
+	AccessKeyID        string `json:"access_key_id,omitempty"`
+	SecretAccessKeyVar string `json:"secret_access_key_var,omitempty"`
+	SessionTokenVar    string `json:"session_token_var,omitempty"`
+	Region             string `json:"region,omitempty"`
+	EndpointURL        string `json:"endpoint_url,omitempty"`
+	AllowHTTP          *bool  `json:"allow_http,omitempty"`
+}
+
+func (ObservabilityS3StorageConfig) atifStorageConfig() {}
+
+// MarshalJSON serializes the S3 config with the core plugin's fixed type discriminator.
+func (config ObservabilityS3StorageConfig) MarshalJSON() ([]byte, error) {
+	type s3StorageJSON struct {
+		Type               string `json:"type"`
+		Bucket             string `json:"bucket"`
+		KeyPrefix          string `json:"key_prefix,omitempty"`
+		AccessKeyID        string `json:"access_key_id,omitempty"`
+		SecretAccessKeyVar string `json:"secret_access_key_var,omitempty"`
+		SessionTokenVar    string `json:"session_token_var,omitempty"`
+		Region             string `json:"region,omitempty"`
+		EndpointURL        string `json:"endpoint_url,omitempty"`
+		AllowHTTP          *bool  `json:"allow_http,omitempty"`
+	}
+	return json.Marshal(s3StorageJSON{
+		Type:               "s3",
+		Bucket:             config.Bucket,
+		KeyPrefix:          config.KeyPrefix,
+		AccessKeyID:        config.AccessKeyID,
+		SecretAccessKeyVar: config.SecretAccessKeyVar,
+		SessionTokenVar:    config.SessionTokenVar,
+		Region:             config.Region,
+		EndpointURL:        config.EndpointURL,
+		AllowHTTP:          config.AllowHTTP,
+	})
+}
+
+// ObservabilityHttpStorageConfig configures HTTP ATIF trajectory upload.
+type ObservabilityHttpStorageConfig struct {
+	Endpoint      string            `json:"endpoint"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	HeaderEnv     map[string]string `json:"header_env,omitempty"`
+	TimeoutMillis uint64            `json:"timeout_millis,omitempty"`
+}
+
+func (ObservabilityHttpStorageConfig) atifStorageConfig() {}
+
+// MarshalJSON serializes the HTTP config with the core plugin's fixed type discriminator.
+func (config ObservabilityHttpStorageConfig) MarshalJSON() ([]byte, error) {
+	type httpStorageJSON struct {
+		Type          string            `json:"type"`
+		Endpoint      string            `json:"endpoint"`
+		Headers       map[string]string `json:"headers,omitempty"`
+		HeaderEnv     map[string]string `json:"header_env,omitempty"`
+		TimeoutMillis uint64            `json:"timeout_millis,omitempty"`
+	}
+	return json.Marshal(httpStorageJSON{
+		Type:          "http",
+		Endpoint:      config.Endpoint,
+		Headers:       config.Headers,
+		HeaderEnv:     config.HeaderEnv,
+		TimeoutMillis: config.TimeoutMillis,
+	})
 }
 
 // ObservabilityOtlpConfig configures OpenTelemetry or OpenInference OTLP export.
@@ -84,6 +160,16 @@ func NewObservabilityAtifConfig() ObservabilityAtifConfig {
 		ModelName:        "unknown",
 		FilenameTemplate: "nemo-relay-atif-{session_id}.json",
 	}
+}
+
+// NewObservabilityS3StorageConfig returns an S3-compatible ATIF storage destination.
+func NewObservabilityS3StorageConfig(bucket string) ObservabilityS3StorageConfig {
+	return ObservabilityS3StorageConfig{Bucket: bucket}
+}
+
+// NewObservabilityHttpStorageConfig returns an HTTP ATIF storage destination.
+func NewObservabilityHttpStorageConfig(endpoint string) ObservabilityHttpStorageConfig {
+	return ObservabilityHttpStorageConfig{Endpoint: endpoint}
 }
 
 // NewObservabilityOtlpConfig returns disabled OTLP settings with core defaults.

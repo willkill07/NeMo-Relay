@@ -31,6 +31,27 @@ test('WebAssembly observability wrappers expose helper defaults', () => {
   });
 });
 
+test('WebAssembly observability wrappers pass through ATIF remote storage config', () => {
+  const s3 = {
+    type: 's3',
+    bucket: 'archive',
+    key_prefix: 'runs/',
+  };
+  const http = {
+    type: 'http',
+    endpoint: 'https://example.com/atif',
+    headers: { 'x-static': 'value' },
+    header_env: { authorization: 'NEMO_RELAY_ATIF_HTTP_AUTH' },
+    timeout_millis: 1500,
+  };
+  const config = observability.atifConfig({
+    enabled: true,
+    storage: [s3, http],
+  });
+
+  assert.deepEqual(config.storage, [s3, http]);
+});
+
 test('WebAssembly observability wrappers build component specs and validate file sinks', () => {
   assert.equal(plugin.listKinds().includes(observability.OBSERVABILITY_PLUGIN_KIND), true);
 

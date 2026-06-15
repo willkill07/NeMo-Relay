@@ -41,12 +41,30 @@ func TestObservabilityConfigHelpers(t *testing.T) {
 	if atif.Enabled || atif.AgentName != "NeMo Relay" || atif.ModelName != "unknown" || atif.FilenameTemplate != "nemo-relay-atif-{session_id}.json" {
 		t.Fatalf("unexpected ATIF defaults: %#v", atif)
 	}
+	allowHTTP := false
+	atif.Storage = []ObservabilityAtifStorageConfig{
+		ObservabilityS3StorageConfig{
+			Bucket:             "archive",
+			KeyPrefix:          "runs/",
+			AccessKeyID:        "test-access-key",
+			SecretAccessKeyVar: "NEMO_RELAY_TEST_SECRET",
+			Region:             "us-west-2",
+			AllowHTTP:          &allowHTTP,
+		},
+		ObservabilityHttpStorageConfig{
+			Endpoint:      "https://example.com/atif",
+			Headers:       map[string]string{"x-static": "value"},
+			HeaderEnv:     map[string]string{"authorization": "NEMO_RELAY_ATIF_HTTP_AUTH"},
+			TimeoutMillis: 1500,
+		},
+	}
 	otlp := NewObservabilityOtlpConfig()
 	if otlp.Enabled || otlp.Transport != "http_binary" || otlp.ServiceName != "nemo-relay" || otlp.TimeoutMillis != 3000 {
 		t.Fatalf("unexpected OTLP defaults: %#v", otlp)
 	}
 
 	config.Atof = &atof
+	config.Atif = &atif
 	wrapped := ObservabilityComponent(config)
 	if wrapped.Kind != ObservabilityPluginKind || !wrapped.Enabled {
 		t.Fatalf("unexpected component wrapper: %#v", wrapped)
@@ -57,6 +75,19 @@ func TestObservabilityConfigHelpers(t *testing.T) {
 	atofConfig := wrapped.Config["atof"].(map[string]any)
 	if _, ok := atofConfig["endpoints"].([]any); !ok {
 		t.Fatalf("expected serialized ATOF endpoints, got %#v", atofConfig)
+	}
+	atifConfig := wrapped.Config["atif"].(map[string]any)
+	storage := atifConfig["storage"].([]any)
+	if len(storage) != 2 {
+		t.Fatalf("expected two ATIF storage destinations, got %#v", storage)
+	}
+	s3 := storage[0].(map[string]any)
+	if s3["type"] != "s3" || s3["bucket"] != "archive" || s3["key_prefix"] != "runs/" || s3["allow_http"] != false {
+		t.Fatalf("unexpected S3 storage config: %#v", s3)
+	}
+	http := storage[1].(map[string]any)
+	if http["type"] != "http" || http["endpoint"] != "https://example.com/atif" || http["timeout_millis"] != float64(1500) {
+		t.Fatalf("unexpected HTTP storage config: %#v", http)
 	}
 }
 
