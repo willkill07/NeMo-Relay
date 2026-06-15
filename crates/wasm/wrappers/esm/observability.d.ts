@@ -21,6 +21,26 @@ export interface AtofEndpointConfig {
   timeout_millis?: number;
 }
 
+export interface S3StorageConfig {
+  type: 's3';
+  bucket: string;
+  key_prefix?: string;
+  access_key_id?: string;
+  secret_access_key_var?: string;
+  session_token_var?: string;
+  region?: string;
+  endpoint_url?: string;
+  allow_http?: boolean;
+}
+
+export interface HttpStorageConfig {
+  type: 'http';
+  endpoint: string;
+  headers?: Record<string, string>;
+  header_env?: Record<string, string>;
+  timeout_millis?: number;
+}
+
 export interface AtifConfig {
   enabled?: boolean;
   agent_name?: string;
@@ -30,6 +50,7 @@ export interface AtifConfig {
   extra?: JsonObject;
   output_directory?: string;
   filename_template?: string;
+  storage?: S3StorageConfig | HttpStorageConfig | Array<S3StorageConfig | HttpStorageConfig>;
 }
 
 export interface OtlpConfig {
