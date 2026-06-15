@@ -48,6 +48,10 @@
     "./pii_redaction": {
       "types": "./pii_redaction.d.ts",
       "default": "./pii_redaction.js"
+    },
+    "./pricing": {
+      "types": "./pricing.d.ts",
+      "default": "./pricing.js"
     }
   },
   "engines": {
