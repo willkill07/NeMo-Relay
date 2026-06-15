@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0 */}
 
 
 Use this section when you want the `nemo-relay` binary to observe local coding
-agent sessions through hooks, a passthrough LLM gateway, and NeMo Relay
+agent sessions through hooks, a passthrough LLM gateway, and NVIDIA NeMo Relay
 observability exporters.
 
 The NeMo Relay CLI is installed by the `nemo-relay-cli` Cargo package. It can run
@@ -24,6 +24,8 @@ Use these guides when you need to:
 - Observe Claude Code, Codex, Cursor, or Hermes Agent sessions locally.
 - Configure coding-agent hooks for NeMo Relay lifecycle events.
 - Route model-provider traffic through the local NeMo Relay gateway.
+- Install persistent Claude Code or Codex host plugins without wrapping the
+  agent command.
 - Validate and install model-pricing catalog sources for local cost estimates.
 - Export local sessions to Agent Trajectory Interchange Format (ATIF), Agent
   Trajectory Observability Format (ATOF) JSONL, OpenTelemetry, or
@@ -36,16 +38,17 @@ If you are instrumenting an application or framework directly, use
 
 ## Agent Harness Support
 
-NeMo Relay CLI support is experimental. Observability is supported, while
-security and optimization support are partial and depend on the hooks each
-agent exposes.
+The NeMo Relay CLI is a supported surface for local coding-agent observability
+and hook-backed security. Optimization remains partial and host-dependent
+because each agent exposes different hooks, provider routes, and execution
+controls.
 
 | Agent | Observability | Security | Optimization | Notes |
 | --- | --- | --- | --- | --- |
-| Claude Code | ✅ Yes | ⚠️ Partial | ⚠️ Partial | Pre-tool hook responses are supported. LLM optimization uses gateway-routed traffic; full coverage depends on loaded Claude Code hooks. |
-| Codex | ✅ Yes | ⚠️ Partial | ⚠️ Partial | Hook forwarding and gateway-routed LLM optimization are supported. Codex hook activation and the missing session-end hook limit full coverage. |
-| Hermes Agent | ✅ Yes | ⚠️ Partial | ⚠️ Partial | Hook forwarding and Hermes API-request telemetry are supported. Guardrail and optimization support depend on Hermes shell and API-request hook coverage. |
-| Cursor | 🚧 Partial | ⚠️ Partial | ❌ No | Hook forwarding is supported. Gateway observability is limited. Missing hooks under `cursor-agent` limit full feature coverage. |
+| Claude Code | Yes | Yes | Partial | Pre-tool hook responses are supported. LLM optimization uses gateway-routed traffic; full coverage depends on loaded Claude Code hooks. |
+| Codex | Yes | Yes | Partial | Hook forwarding and gateway-routed LLM optimization are supported after hooks are reviewed and activated. The missing session-end hook limits full coverage. |
+| Hermes Agent | Yes | Yes | Partial | Hook forwarding, pre-tool guardrails, and Hermes API-request telemetry are supported. Optimization depends on Hermes shell and API-request hook coverage. |
+| Cursor | Partial | Limited | No | Hook forwarding is supported. Gateway observability is limited. Missing hooks under `cursor-agent` limit full feature coverage. |
 
 ## Guides
 
@@ -53,6 +56,8 @@ Use these guide links to move from CLI setup into agent-specific instructions.
 
 - [Basic Usage](/nemo-relay-cli/basic-usage) explains gateway routes, transparent runs,
   shared configuration, hook forwarding, and runtime mapping.
+- [Plugin Installation](/nemo-relay-cli/plugin-installation) covers persistent
+  Claude Code and Codex plugin setup through host marketplaces.
 - [Claude Code](/nemo-relay-cli/claude-code) covers transparent Claude Code
   runs, Anthropic gateway routing, ATIF verification, and unsupported Claude
   application modes.
