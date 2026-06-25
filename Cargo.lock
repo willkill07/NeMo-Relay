@@ -1337,6 +1337,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "js-sys",
+ "nemo-relay-types",
  "object_store",
  "openinference-semantic-conventions",
  "opentelemetry",
@@ -1481,6 +1482,19 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "uuid",
+]
+
+[[package]]
+name = "nemo-relay-types"
+version = "0.5.0"
+dependencies = [
+ "bitflags",
+ "chrono",
+ "schemars",
+ "serde",
+ "serde_json",
+ "typed-builder",
  "uuid",
 ]
 

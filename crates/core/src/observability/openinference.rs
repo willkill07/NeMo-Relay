@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{estimate_cost_for_response_or_requested_model, manual};
-use crate::api::event::{Event, ScopeCategory};
+use crate::api::event::{Event, EventNormalizationExt, ScopeCategory};
 use crate::api::runtime::EventSubscriberFn;
 use crate::api::scope::ScopeType;
 use crate::api::subscriber::{deregister_subscriber, flush_subscribers, register_subscriber};
