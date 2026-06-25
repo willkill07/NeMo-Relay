@@ -12,6 +12,7 @@ use crate::config::{
 };
 
 struct EnvScope {
+    _cwd_guard: Option<crate::test_support::CwdTestScope>,
     _guard: std::sync::MutexGuard<'static, ()>,
     values: Vec<(&'static str, Option<OsString>)>,
 }
@@ -20,13 +21,19 @@ impl EnvScope {
     fn hermetic(temp: &tempfile::TempDir) -> Self {
         let xdg = temp.path().join("xdg");
         std::fs::create_dir_all(&xdg).unwrap();
-        Self::set(&[
-            ("HOME", Some(temp.path().as_os_str())),
-            ("XDG_CONFIG_HOME", Some(xdg.as_os_str())),
-        ])
+        Self::set_with_cwd_guard(
+            &[
+                ("HOME", Some(temp.path().as_os_str())),
+                ("XDG_CONFIG_HOME", Some(xdg.as_os_str())),
+            ],
+            Some(crate::test_support::CwdTestScope::locked()),
+        )
     }
 
-    fn set(values: &[(&'static str, Option<&std::ffi::OsStr>)]) -> Self {
+    fn set_with_cwd_guard(
+        values: &[(&'static str, Option<&std::ffi::OsStr>)],
+        cwd_guard: Option<crate::test_support::CwdTestScope>,
+    ) -> Self {
         let guard = crate::test_support::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -43,6 +50,7 @@ impl EnvScope {
             }
         }
         Self {
+            _cwd_guard: cwd_guard,
             _guard: guard,
             values: previous,
         }
