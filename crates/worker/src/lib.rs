@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
 #[cfg(unix)]
-use std::path::PathBuf;
+use std::os::unix::fs::FileTypeExt;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -38,6 +40,7 @@ use nemo_relay_worker_proto::v1::{
 use nemo_relay_worker_proto::{WORKER_PROTOCOL_GRPC_V1, decode_json_envelope, json_envelope};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::OnceCell;
 #[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::{Channel, Endpoint, Server};
@@ -438,6 +441,7 @@ pub struct PluginRuntime {
     activation_id: String,
     auth_token: String,
     host_endpoint: String,
+    host_channel: Arc<OnceCell<Channel>>,
 }
 
 impl PluginRuntime {
@@ -554,8 +558,10 @@ impl PluginRuntime {
     }
 
     async fn host_client(&self) -> Result<RelayHostRuntimeClient<Channel>> {
-        connect_host_endpoint(&self.host_endpoint)
+        self.host_channel
+            .get_or_try_init(|| connect_host_endpoint(&self.host_endpoint))
             .await
+            .cloned()
             .map(RelayHostRuntimeClient::new)
     }
 
@@ -696,6 +702,7 @@ pub async fn serve_plugin_arc_with_config(
         activation_id: config.activation_id,
         auth_token: config.auth_token,
         host_endpoint: config.host_endpoint,
+        host_channel: Arc::new(OnceCell::new()),
     };
     let service = WorkerService {
         plugin,
@@ -709,7 +716,7 @@ pub async fn serve_plugin_arc_with_config(
 async fn serve_worker_service(service: WorkerService, endpoint: &str) -> Result<()> {
     if endpoint.starts_with("unix://") {
         let path = parse_unix_endpoint(endpoint)?;
-        let _ = std::fs::remove_file(&path);
+        remove_stale_socket(&path)?;
         let listener = UnixListener::bind(&path).map_err(|err| {
             WorkerSdkError::Transport(format!("failed to bind worker socket: {err}"))
         })?;
@@ -804,11 +811,10 @@ impl PluginWorker for WorkerService {
             .unwrap_or(Json::Null);
         let diagnostics = self.plugin.validate(&config);
         Ok(Response::new(ValidateResponse {
-            diagnostics: Some(
-                json_envelope("nemo.relay.PluginDiagnostics@1", &diagnostics).map_err(|err| {
-                    Status::internal(format!("failed to encode diagnostics: {err}"))
-                })?,
-            ),
+            diagnostics: Some(infallible_json_envelope(
+                "nemo.relay.PluginDiagnostics@1",
+                &diagnostics,
+            )),
             error: None,
         }))
     }
@@ -1023,10 +1029,10 @@ impl WorkerService {
                 let payload = llm_payload(request.payload)?;
                 let request_value = required_json::<LlmRequest>(payload.request, "llm request")?;
                 let handler = self.llm_sanitize_request(&request.registration_name)?;
-                Ok(json_response(serde_json::to_value(with_thread_scope(
-                    &scope,
-                    || handler(request_value),
-                ))?))
+                let request = with_thread_scope(&scope, || handler(request_value));
+                Ok(json_response(
+                    serde_json::to_value(request).expect("LLM request is JSON serializable"),
+                ))
             }
             RegistrationSurface::LlmSanitizeResponseGuardrail => {
                 let payload = llm_payload(request.payload)?;
@@ -1289,20 +1295,13 @@ fn empty_response() -> InvokeResponse {
 }
 
 fn json_response(value: Json) -> InvokeResponse {
-    match json_envelope("nemo.relay.Json@1", &value) {
-        Ok(value) => InvokeResponse {
-            result: Some(nemo_relay_worker_proto::v1::invoke_response::Result::Json(
-                JsonResult {
-                    value: Some(value),
-                    error: None,
-                },
-            )),
-        },
-        Err(err) => InvokeResponse {
-            result: Some(nemo_relay_worker_proto::v1::invoke_response::Result::Error(
-                sdk_error_to_worker(WorkerSdkError::Serialization(err)),
-            )),
-        },
+    InvokeResponse {
+        result: Some(nemo_relay_worker_proto::v1::invoke_response::Result::Json(
+            JsonResult {
+                value: Some(infallible_json_envelope("nemo.relay.Json@1", &value)),
+                error: None,
+            },
+        )),
     }
 }
 
@@ -1360,6 +1359,10 @@ fn optional_json_envelope(value: Option<Json>) -> Result<Option<JsonEnvelope>> {
         .as_ref()
         .map(|value| json_envelope("nemo.relay.Json@1", value).map_err(WorkerSdkError::from))
         .transpose()
+}
+
+fn infallible_json_envelope<T: serde::Serialize>(schema: &str, value: &T) -> JsonEnvelope {
+    json_envelope(schema, value).expect("Relay DTOs and serde_json::Value are JSON serializable")
 }
 
 fn sdk_error_to_worker(error: WorkerSdkError) -> WorkerError {
@@ -1568,6 +1571,32 @@ fn parse_unix_endpoint(endpoint: &str) -> Result<PathBuf> {
         .strip_prefix("unix://")
         .map(PathBuf::from)
         .ok_or_else(|| WorkerSdkError::InvalidInput(format!("unsupported endpoint '{endpoint}'")))
+}
+
+#[cfg(unix)]
+fn remove_stale_socket(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(WorkerSdkError::Transport(format!(
+                "failed to inspect worker socket path '{}': {err}",
+                path.display()
+            )));
+        }
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(WorkerSdkError::InvalidInput(format!(
+            "worker socket path '{}' exists and is not a socket",
+            path.display()
+        )));
+    }
+    std::fs::remove_file(path).map_err(|err| {
+        WorkerSdkError::Transport(format!(
+            "failed to remove stale worker socket '{}': {err}",
+            path.display()
+        ))
+    })
 }
 
 fn required_env(name: &str) -> Result<String> {
