@@ -771,9 +771,31 @@ python_plugin_sync_args() {
     fi
 }
 
+python_plugin_grpcio_tools_version() {
+    local python_executable=""
+    python_executable="$(uv_python_executable)"
+    "$python_executable" - <<'PY'
+import tomllib
+from pathlib import Path
+
+requirements = tomllib.loads(
+    Path("python/plugin/pyproject.toml").read_text()
+)["build-system"]["requires"]
+prefix = "grpcio-tools=="
+for requirement in requirements:
+    if requirement.startswith(prefix):
+        print(requirement.removeprefix(prefix))
+        break
+else:
+    raise SystemExit("python/plugin/pyproject.toml must pin grpcio-tools")
+PY
+}
+
 generate_python_worker_proto_files() {
     local output_dir="$1"
-    uvx --from grpcio-tools==1.81.1 python python/plugin/build_backend.py --generate "$output_dir"
+    local grpcio_tools_version=""
+    grpcio_tools_version="$(python_plugin_grpcio_tools_version)"
+    uvx --from "grpcio-tools==$grpcio_tools_version" python python/plugin/build_backend.py --generate "$output_dir"
 }
 
 prepend_go_bin_to_path() {
