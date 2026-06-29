@@ -741,6 +741,28 @@ fn manifest_rejects_uri_config_schema_paths() {
 }
 
 #[test]
+fn manifest_rejects_unc_config_schema_paths() {
+    for path_declaration in [
+        r#"path = '\\server\share\config.schema.json'"#,
+        r#"path = '\\?\UNC\server\share\config.schema.json'"#,
+        r#"path = "//server/share/config.schema.json""#,
+    ] {
+        let err = DynamicPluginManifest::parse_toml(
+            &valid_worker_manifest_toml()
+                .replace(r#"path = "config.schema.json""#, path_declaration),
+        )
+        .expect_err("UNC config schema path should fail");
+
+        match err {
+            PluginError::InvalidConfig(message) => {
+                assert!(message.contains("local filesystem path"), "{message}");
+            }
+            other => panic!("unexpected UNC config schema path error: {other}"),
+        }
+    }
+}
+
+#[test]
 fn manifest_accepts_windows_drive_config_schema_paths() {
     for path_declaration in [
         r#"path = "C:/schemas/config.schema.json""#,

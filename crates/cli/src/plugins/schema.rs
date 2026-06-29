@@ -21,7 +21,13 @@ const DRAFT_2020_12_HTTP_URI: &str = "http://json-schema.org/draft/2020-12/schem
 const REDACTED: &str = "<redacted>";
 const EDIT_REDACTED_PREFIX: &str = "<redacted:nemo-relay:";
 
-pub(super) type SecretEditValues = BTreeMap<String, Value>;
+pub(super) type SecretEditValues = BTreeMap<String, SecretEditValue>;
+
+#[derive(Debug, Clone)]
+pub(super) struct SecretEditValue {
+    value: Value,
+    pattern: SecretPattern,
+}
 
 /// Supported JSON Schema dialects for dynamic plugin configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,9 +252,18 @@ impl PluginConfigSchema {
         (redacted, secrets)
     }
 
-    /// Restores only the exact per-value tokens emitted by [`Self::redact_for_edit`].
-    pub(super) fn restore_edit_secrets(&self, edited: &Value, secrets: &SecretEditValues) -> Value {
-        restore_secret_tokens(edited, secrets)
+    /// Restores redaction tokens only at their schema-declared secret locations.
+    pub(super) fn restore_edit_secrets(
+        &self,
+        edited: &Value,
+        secrets: &SecretEditValues,
+    ) -> Result<Value, CliError> {
+        restore_secret_tokens(edited, secrets).map_err(|error| {
+            CliError::Config(format!(
+                "dynamic plugin '{}' configuration contains an invalid secret redaction token: {error}",
+                self.plugin_id
+            ))
+        })
     }
 }
 
@@ -308,19 +323,31 @@ fn reject_external_references(
         let Some(object) = schema.as_object() else {
             return Ok(());
         };
-        for key in ["$ref", "$dynamicRef"] {
-            if let Some(reference) = object.get(key).and_then(Value::as_str)
-                && !reference.starts_with('#')
-            {
-                return Err(schema_error(
-                    plugin_id,
-                    file_path,
-                    format!(
-                        "{key} at JSON pointer '{}' must be a local fragment reference beginning with '#', got '{reference}'",
-                        push_pointer(pointer, key)
-                    ),
-                ));
-            }
+        if object.contains_key("$dynamicRef") || object.contains_key("$dynamicAnchor") {
+            return Err(schema_error(
+                plugin_id,
+                file_path,
+                format!(
+                    "Draft 2020-12 dynamic references are not supported at JSON pointer '{}'",
+                    if object.contains_key("$dynamicRef") {
+                        push_pointer(pointer, "$dynamicRef")
+                    } else {
+                        push_pointer(pointer, "$dynamicAnchor")
+                    }
+                ),
+            ));
+        }
+        if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+            && !reference.starts_with('#')
+        {
+            return Err(schema_error(
+                plugin_id,
+                file_path,
+                format!(
+                    "$ref at JSON pointer '{}' must be a local fragment reference beginning with '#', got '{reference}'",
+                    push_pointer(pointer, "$ref")
+                ),
+            ));
         }
 
         for key in [
@@ -834,7 +861,13 @@ impl SecretPattern {
                 return;
             }
             let token = next_secret_token(secrets, occupied, next_token);
-            secrets.insert(token.clone(), value.clone());
+            secrets.insert(
+                token.clone(),
+                SecretEditValue {
+                    value: value.clone(),
+                    pattern: self.clone(),
+                },
+            );
             *value = Value::String(token);
             return;
         }
@@ -887,6 +920,34 @@ impl SecretPattern {
                     SecretSegment::Index(index) => property.parse::<usize>() == Ok(*index),
                 })
     }
+
+    fn matches_instance_path(&self, path: &[SecretInstanceSegment]) -> bool {
+        self.0.len() == path.len()
+            && self
+                .0
+                .iter()
+                .zip(path)
+                .all(|(pattern, instance)| match (pattern, instance) {
+                    (
+                        SecretSegment::Property(expected),
+                        SecretInstanceSegment::Property(actual),
+                    ) => expected == actual,
+                    (SecretSegment::Any, _) => true,
+                    (SecretSegment::Pattern(pattern), SecretInstanceSegment::Property(actual)) => {
+                        pattern_matches(pattern, actual)
+                    }
+                    (SecretSegment::Index(expected), SecretInstanceSegment::Index(actual)) => {
+                        expected == actual
+                    }
+                    _ => false,
+                })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SecretInstanceSegment {
+    Property(String),
+    Index(usize),
 }
 
 fn pattern_matches(pattern: &str, property: &str) -> bool {
@@ -928,26 +989,47 @@ fn next_secret_token(
     }
 }
 
-fn restore_secret_tokens(value: &Value, secrets: &SecretEditValues) -> Value {
-    match value {
-        Value::String(value) => secrets
-            .get(value)
-            .cloned()
-            .unwrap_or_else(|| Value::String(value.clone())),
-        Value::Array(values) => Value::Array(
-            values
-                .iter()
-                .map(|value| restore_secret_tokens(value, secrets))
-                .collect(),
-        ),
-        Value::Object(values) => Value::Object(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), restore_secret_tokens(value, secrets)))
-                .collect(),
-        ),
-        value => value.clone(),
+fn restore_secret_tokens(value: &Value, secrets: &SecretEditValues) -> Result<Value, String> {
+    fn restore(
+        value: &Value,
+        secrets: &SecretEditValues,
+        path: &mut Vec<SecretInstanceSegment>,
+        used_tokens: &mut HashSet<String>,
+    ) -> Result<Value, String> {
+        match value {
+            Value::String(value) => match secrets.get(value) {
+                None => Ok(Value::String(value.clone())),
+                Some(secret) if !secret.pattern.matches_instance_path(path) => Err(format!(
+                    "token '{value}' may only appear at its original schema-declared secret location"
+                )),
+                Some(_) if !used_tokens.insert(value.clone()) => {
+                    Err(format!("token '{value}' may only appear once"))
+                }
+                Some(secret) => Ok(secret.value.clone()),
+            },
+            Value::Array(values) => {
+                let mut restored = Vec::with_capacity(values.len());
+                for (index, value) in values.iter().enumerate() {
+                    path.push(SecretInstanceSegment::Index(index));
+                    restored.push(restore(value, secrets, path, used_tokens)?);
+                    path.pop();
+                }
+                Ok(Value::Array(restored))
+            }
+            Value::Object(values) => {
+                let mut restored = Map::with_capacity(values.len());
+                for (key, value) in values {
+                    path.push(SecretInstanceSegment::Property(key.clone()));
+                    restored.insert(key.clone(), restore(value, secrets, path, used_tokens)?);
+                    path.pop();
+                }
+                Ok(Value::Object(restored))
+            }
+            value => Ok(value.clone()),
+        }
     }
+
+    restore(value, secrets, &mut Vec::new(), &mut HashSet::new())
 }
 
 fn discover_secret_patterns(
@@ -1124,6 +1206,24 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("local fragment"), "{message}");
         assert!(message.contains("/$defs/remote/$ref"), "{message}");
+
+        for schema in [
+            json!({
+                "$schema": DRAFT2020,
+                "type": "object",
+                "$dynamicRef": "#config"
+            }),
+            json!({
+                "$schema": DRAFT2020,
+                "type": "object",
+                "$defs": {"config": {"$dynamicAnchor": "config", "type": "object"}}
+            }),
+        ] {
+            let (_directory, path) = write_schema(&schema);
+            let error = PluginConfigSchema::load("acme.bad", path)
+                .expect_err("reject unsupported dynamic references");
+            assert!(error.to_string().contains("dynamic references"));
+        }
 
         load(&json!({
             "$schema": DRAFT2020,
@@ -1338,7 +1438,12 @@ mod tests {
         assert_eq!(config["token"], "top-secret", "redaction must clone");
 
         let (redacted, secrets) = loaded.redact_for_edit(&config);
-        assert_eq!(loaded.restore_edit_secrets(&redacted, &secrets), config);
+        assert_eq!(
+            loaded
+                .restore_edit_secrets(&redacted, &secrets)
+                .expect("restore original secrets"),
+            config
+        );
 
         let mut replacement = redacted;
         replacement["token"] = json!("replacement");
@@ -1347,10 +1452,32 @@ mod tests {
             .unwrap()
             .remove("password");
         replacement["records"].as_array_mut().unwrap().swap(0, 1);
-        let restored = loaded.restore_edit_secrets(&replacement, &secrets);
+        let restored = loaded
+            .restore_edit_secrets(&replacement, &secrets)
+            .expect("preserve reordered array secrets");
         assert_eq!(restored["token"], json!("replacement"));
         assert!(restored["nested"].get("password").is_none());
         assert_eq!(restored["records"], json!([{"key": "two"}, {"key": "one"}]));
+
+        let (redacted, secrets) = loaded.redact_for_edit(&config);
+        let mut moved = redacted.clone();
+        let token = redacted["token"].clone();
+        moved["visible"] = token;
+        let error = loaded
+            .restore_edit_secrets(&moved, &secrets)
+            .expect_err("reject token copied to a non-secret field");
+        assert!(
+            error
+                .to_string()
+                .contains("schema-declared secret location")
+        );
+
+        let mut duplicated = redacted;
+        duplicated["records"][1]["key"] = duplicated["records"][0]["key"].clone();
+        let error = loaded
+            .restore_edit_secrets(&duplicated, &secrets)
+            .expect_err("reject duplicate secret token");
+        assert!(error.to_string().contains("may only appear once"));
     }
 
     #[test]

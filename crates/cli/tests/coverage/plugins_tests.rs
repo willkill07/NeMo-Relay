@@ -1495,7 +1495,11 @@ fn dynamic_editor_loads_document_local_plugins_and_redacts_schema_secrets() {
         &temp.path().join("plugins/absent"),
         "acme.absent",
         None,
-        None,
+        Some(&json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"optional": {"type": "string"}}
+        })),
     );
     write_editor_dynamic_manifest(&temp.path().join("plugins/empty"), "acme.empty", None, None);
     let path = temp.path().join("plugins.toml");
@@ -1533,6 +1537,10 @@ config = {}
     assert!(labels.iter().any(|label| label.contains("<redacted>")));
     assert!(labels.iter().all(|label| !label.contains("super-secret")));
 
+    states[2].clear_top_level_field("optional");
+    states[2].reset_top_level_field("optional").unwrap();
+    assert_eq!(states[2].config(), None);
+
     let mut preview = document.clone();
     for state in &states {
         state.apply_to_document(&mut preview, true).unwrap();
@@ -1549,6 +1557,11 @@ config = {}
     assert!(
         preview_root["plugins"]["dynamic"].as_array().unwrap()[1]["config"]["local_time"]
             .is_datetime()
+    );
+    assert!(
+        preview_root["plugins"]["dynamic"].as_array().unwrap()[2]
+            .get("config")
+            .is_none()
     );
 
     states[0].reset_top_level_field("retries").unwrap();

@@ -519,7 +519,7 @@ fn validate_config_schema_contract(
         (false, None) => return Ok(()),
         (true, Some(config_schema)) => {
             let path = required_trimmed_string(Some(&config_schema.path), "config_schema.path")?;
-            if has_uri_scheme(path.trim()) {
+            if has_uri_scheme(path.trim()) || is_unc_path(path.trim()) {
                 return Err(PluginError::InvalidConfig(
                     "config_schema.path must be a local filesystem path, not a URI".into(),
                 ));
@@ -527,6 +527,10 @@ fn validate_config_schema_contract(
         }
     }
     Ok(())
+}
+
+fn is_unc_path(value: &str) -> bool {
+    value.starts_with(r"\\") || value.starts_with("//")
 }
 
 fn has_uri_scheme(value: &str) -> bool {

@@ -203,13 +203,10 @@ impl DynamicPluginEditorState {
     }
 
     fn remove_field(&mut self, path: &[String]) {
-        if self.config.is_none() {
-            self.config = Some(Map::new());
-        }
         if let Some(config) = &mut self.config {
             remove_value_at_path(config, path);
+            self.touched = true;
         }
-        self.touched = true;
     }
 
     fn reset_field(&mut self, path: &[String], field: &DynamicConfigField) {
@@ -575,11 +572,10 @@ fn prompt_dynamic_value(
             else {
                 return Ok(None);
             };
-            let value = state
-                .schema
-                .as_ref()
-                .map(|schema| schema.restore_edit_secrets(&value, &secrets))
-                .unwrap_or(value);
+            let value = match &state.schema {
+                Some(schema) => schema.restore_edit_secrets(&value, &secrets)?,
+                None => value,
+            };
             let object = value
                 .as_object()
                 .ok_or_else(|| CliError::Config(format!("{} must be a JSON object", field.key)))?;
@@ -598,13 +594,11 @@ fn prompt_dynamic_value(
             else {
                 return Ok(None);
             };
-            Ok(Some(
-                state
-                    .schema
-                    .as_ref()
-                    .map(|schema| schema.restore_edit_secrets(&value, &secrets))
-                    .unwrap_or(value),
-            ))
+            let value = match &state.schema {
+                Some(schema) => schema.restore_edit_secrets(&value, &secrets)?,
+                None => value,
+            };
+            Ok(Some(value))
         }
         DynamicConfigFieldKind::Object { .. } => unreachable!(),
     }
@@ -717,11 +711,10 @@ fn prompt_raw_config(
     };
     let value: Value = serde_json::from_str(value.trim())
         .map_err(|error| CliError::Config(format!("invalid JSON configuration: {error}")))?;
-    let value = state
-        .schema
-        .as_ref()
-        .map(|schema| schema.restore_edit_secrets(&value, &secrets))
-        .unwrap_or(value);
+    let value = match &state.schema {
+        Some(schema) => schema.restore_edit_secrets(&value, &secrets)?,
+        None => value,
+    };
     let object = value.as_object().cloned().ok_or_else(|| {
         CliError::Config(format!(
             "dynamic plugin '{}' configuration must be a JSON object",
