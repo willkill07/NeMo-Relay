@@ -1533,6 +1533,12 @@ config = {}
     assert!(states[2].menu_summary().contains("config absent"));
     assert!(states[3].menu_summary().contains("explicit empty config"));
     assert!(states[0].top_level_field_uses_hidden_json("records"));
+    assert_eq!(
+        states[0]
+            .restore_raw_field_for_test(&["records".to_owned()])
+            .unwrap(),
+        json!([{ "password": "nested-secret" }])
+    );
     let labels = states[0].top_level_field_labels();
     assert!(labels.iter().any(|label| label.contains("<redacted>")));
     assert!(labels.iter().all(|label| !label.contains("super-secret")));

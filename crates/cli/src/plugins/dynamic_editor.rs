@@ -183,18 +183,68 @@ impl DynamicPluginEditorState {
             .is_some_and(|schema| schema.has_secrets_at(path))
     }
 
-    fn field_value_for_raw_edit(&self, path: &[String]) -> (Option<Value>, SecretEditValues, bool) {
+    fn field_value_for_raw_edit(
+        &self,
+        path: &[String],
+    ) -> (
+        Option<Value>,
+        Option<Map<String, Value>>,
+        SecretEditValues,
+        bool,
+    ) {
         let original = Value::Object(self.config.clone().unwrap_or_default());
         let Some(schema) = &self.schema else {
             return (
                 self.field_value(path).cloned(),
+                None,
                 SecretEditValues::new(),
                 false,
             );
         };
         let (redacted, secrets) = schema.redact_for_edit(&original);
         let value = value_at_path(redacted.as_object(), path).cloned();
-        (value, secrets, schema.has_secrets_at(path))
+        (
+            value,
+            redacted.as_object().cloned(),
+            secrets,
+            schema.has_secrets_at(path),
+        )
+    }
+
+    fn restore_raw_field_edit(
+        &self,
+        path: &[String],
+        value: Value,
+        redacted_config: Option<Map<String, Value>>,
+        secrets: &SecretEditValues,
+    ) -> Result<Value, CliError> {
+        let Some(schema) = &self.schema else {
+            return Ok(value);
+        };
+        let mut config = redacted_config;
+        set_value_at_path(&mut config, path, value);
+        let restored =
+            schema.restore_edit_secrets(&Value::Object(config.unwrap_or_default()), secrets)?;
+        value_at_path(restored.as_object(), path)
+            .cloned()
+            .ok_or_else(|| {
+                CliError::Config(format!(
+                    "dynamic plugin '{}' raw field '{}' could not be restored",
+                    self.plugin_id,
+                    path.join(".")
+                ))
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn restore_raw_field_for_test(&self, path: &[String]) -> Result<Value, CliError> {
+        let (value, redacted_config, secrets, _) = self.field_value_for_raw_edit(path);
+        self.restore_raw_field_edit(
+            path,
+            value.unwrap_or(Value::Null),
+            redacted_config,
+            &secrets,
+        )
     }
 
     fn set_field(&mut self, path: &[String], value: Value) {
@@ -561,7 +611,7 @@ fn prompt_dynamic_value(
             Ok(Some(Value::Number(number)))
         }
         DynamicConfigFieldKind::StringMap => {
-            let (current, secrets, hidden) = state.field_value_for_raw_edit(path);
+            let (current, redacted_config, secrets, hidden) = state.field_value_for_raw_edit(path);
             let Some(value) = prompt_json_value(
                 theme,
                 field,
@@ -572,10 +622,7 @@ fn prompt_dynamic_value(
             else {
                 return Ok(None);
             };
-            let value = match &state.schema {
-                Some(schema) => schema.restore_edit_secrets(&value, &secrets)?,
-                None => value,
-            };
+            let value = state.restore_raw_field_edit(path, value, redacted_config, &secrets)?;
             let object = value
                 .as_object()
                 .ok_or_else(|| CliError::Config(format!("{} must be a JSON object", field.key)))?;
@@ -589,15 +636,12 @@ fn prompt_dynamic_value(
         }
         DynamicConfigFieldKind::RawJson => {
             let fallback = field.default.clone().unwrap_or(Value::Null);
-            let (current, secrets, hidden) = state.field_value_for_raw_edit(path);
+            let (current, redacted_config, secrets, hidden) = state.field_value_for_raw_edit(path);
             let Some(value) = prompt_json_value(theme, field, current.as_ref(), fallback, hidden)?
             else {
                 return Ok(None);
             };
-            let value = match &state.schema {
-                Some(schema) => schema.restore_edit_secrets(&value, &secrets)?,
-                None => value,
-            };
+            let value = state.restore_raw_field_edit(path, value, redacted_config, &secrets)?;
             Ok(Some(value))
         }
         DynamicConfigFieldKind::Object { .. } => unreachable!(),
