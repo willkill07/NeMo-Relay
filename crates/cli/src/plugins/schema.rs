@@ -1,0 +1,1416 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Static JSON Schema loading and editor metadata for dynamic plugins.
+
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+
+use jsonschema::{Draft, Validator};
+use serde_json::{Map, Value};
+
+use crate::error::CliError;
+
+const DRAFT_7_URI: &str = "http://json-schema.org/draft-07/schema";
+const DRAFT_7_HTTPS_URI: &str = "https://json-schema.org/draft-07/schema";
+const DRAFT_2020_12_URI: &str = "https://json-schema.org/draft/2020-12/schema";
+const DRAFT_2020_12_HTTP_URI: &str = "http://json-schema.org/draft/2020-12/schema";
+const REDACTED: &str = "<redacted>";
+const EDIT_REDACTED_PREFIX: &str = "<redacted:nemo-relay:";
+
+pub(super) type SecretEditValues = BTreeMap<String, Value>;
+
+/// Supported JSON Schema dialects for dynamic plugin configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConfigSchemaDraft {
+    Draft7,
+    Draft202012,
+}
+
+impl ConfigSchemaDraft {
+    fn validator_draft(self) -> Draft {
+        match self {
+            Self::Draft7 => Draft::Draft7,
+            Self::Draft202012 => Draft::Draft202012,
+        }
+    }
+}
+
+/// Editor representation of a dynamic plugin's object-root configuration schema.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DynamicConfigEditorSchema {
+    pub(super) title: Option<String>,
+    pub(super) description: Option<String>,
+    pub(super) fields: Vec<DynamicConfigField>,
+}
+
+/// One named property in a dynamic plugin configuration schema.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DynamicConfigField {
+    pub(super) key: String,
+    pub(super) title: String,
+    pub(super) description: Option<String>,
+    pub(super) default: Option<Value>,
+    pub(super) required: bool,
+    pub(super) kind: DynamicConfigFieldKind,
+}
+
+/// Native editor control selected for a configuration property.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum DynamicConfigFieldKind {
+    Boolean,
+    String { secret: bool },
+    Integer,
+    Number,
+    StringEnum { options: Vec<String>, secret: bool },
+    Object { fields: Vec<DynamicConfigField> },
+    StringMap,
+    RawJson,
+}
+
+/// A loaded and compiled dynamic plugin configuration schema.
+#[derive(Debug, Clone)]
+pub(super) struct PluginConfigSchema {
+    plugin_id: String,
+    #[cfg(test)]
+    path: PathBuf,
+    #[cfg(test)]
+    source: Value,
+    #[cfg(test)]
+    draft: ConfigSchemaDraft,
+    validator: Validator,
+    editor: DynamicConfigEditorSchema,
+    secret_patterns: Vec<SecretPattern>,
+    #[cfg(test)]
+    secret_paths: Vec<String>,
+}
+
+impl PluginConfigSchema {
+    /// Reads, validates, and compiles a plugin's static configuration schema.
+    pub(super) fn load(
+        plugin_id: impl Into<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, CliError> {
+        let plugin_id = plugin_id.into();
+        let path = path.as_ref().to_path_buf();
+        let contents = fs::read_to_string(&path).map_err(|error| {
+            schema_error(&plugin_id, &path, format!("failed to read schema: {error}"))
+        })?;
+        let source: Value = serde_json::from_str(&contents).map_err(|error| {
+            schema_error(
+                &plugin_id,
+                &path,
+                format!("schema is not valid JSON: {error}"),
+            )
+        })?;
+
+        let draft = parse_draft(&plugin_id, &path, &source)?;
+        reject_external_references(&plugin_id, &path, &source)?;
+        validate_schema_document(&plugin_id, &path, draft, &source)?;
+        let validator = jsonschema::options()
+            .with_draft(draft.validator_draft())
+            .build(&source)
+            .map_err(|error| {
+                schema_error(
+                    &plugin_id,
+                    &path,
+                    format!("failed to compile schema: {error}"),
+                )
+            })?;
+
+        let mut root_references = HashSet::new();
+        let resolved_root =
+            resolve_schema(&source, &source, &mut root_references).map_err(|error| {
+                schema_error(
+                    &plugin_id,
+                    &path,
+                    format!("root schema cannot be resolved: {error}"),
+                )
+            })?;
+        if schema_type(resolved_root) != Some("object") {
+            return Err(schema_error(
+                &plugin_id,
+                &path,
+                "root schema must resolve to type 'object'",
+            ));
+        }
+
+        let fields =
+            build_object_fields(&plugin_id, &path, &source, resolved_root, &root_references)?;
+        let editor = DynamicConfigEditorSchema {
+            title: annotation_string(&source, resolved_root, "title"),
+            description: annotation_string(&source, resolved_root, "description"),
+            fields,
+        };
+
+        let mut secret_patterns = Vec::new();
+        discover_secret_patterns(&source, &source, &[], &HashSet::new(), &mut secret_patterns);
+        secret_patterns.sort();
+        secret_patterns.dedup();
+        #[cfg(test)]
+        let secret_paths = secret_patterns.iter().map(SecretPattern::display).collect();
+
+        Ok(Self {
+            plugin_id,
+            #[cfg(test)]
+            path,
+            #[cfg(test)]
+            source,
+            #[cfg(test)]
+            draft,
+            validator,
+            editor,
+            secret_patterns,
+            #[cfg(test)]
+            secret_paths,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    #[cfg(test)]
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[cfg(test)]
+    pub(super) fn source(&self) -> &Value {
+        &self.source
+    }
+
+    #[cfg(test)]
+    pub(super) fn draft(&self) -> ConfigSchemaDraft {
+        self.draft
+    }
+
+    pub(super) fn editor(&self) -> &DynamicConfigEditorSchema {
+        &self.editor
+    }
+
+    pub(super) fn fields(&self) -> &[DynamicConfigField] {
+        &self.editor.fields
+    }
+
+    /// Validates one object configuration and reports the first failing instance pointer.
+    pub(super) fn validate(&self, config: &Value) -> Result<(), CliError> {
+        self.validator.validate(config).map_err(|error| {
+            let pointer = error.instance_path().to_string();
+            CliError::Config(format!(
+                "dynamic plugin '{}' configuration at JSON pointer '{}' is invalid: {error}",
+                self.plugin_id, pointer
+            ))
+        })
+    }
+
+    /// Returns schema-discovered secret paths. `*` denotes an array item or arbitrary property.
+    #[cfg(test)]
+    pub(super) fn secret_paths(&self) -> &[String] {
+        &self.secret_paths
+    }
+
+    /// Clones a configuration and masks every schema-declared secret present in it.
+    pub(super) fn redact(&self, config: &Value) -> Value {
+        let mut redacted = config.clone();
+        for pattern in &self.secret_patterns {
+            pattern.redact(&mut redacted, 0);
+        }
+        redacted
+    }
+
+    pub(super) fn has_secrets(&self) -> bool {
+        !self.secret_patterns.is_empty()
+    }
+
+    pub(super) fn has_secrets_at(&self, path: &[String]) -> bool {
+        self.secret_patterns
+            .iter()
+            .any(|pattern| pattern.applies_below(path))
+    }
+
+    /// Redacts secrets with per-value tokens so raw JSON editing can safely reorder values.
+    pub(super) fn redact_for_edit(&self, config: &Value) -> (Value, SecretEditValues) {
+        let mut redacted = config.clone();
+        let mut secrets = BTreeMap::new();
+        let mut occupied = HashSet::new();
+        collect_string_values(config, &mut occupied);
+        let mut next_token = 0;
+        for pattern in &self.secret_patterns {
+            pattern.redact_for_edit(&mut redacted, 0, &mut secrets, &occupied, &mut next_token);
+        }
+        (redacted, secrets)
+    }
+
+    /// Restores only the exact per-value tokens emitted by [`Self::redact_for_edit`].
+    pub(super) fn restore_edit_secrets(&self, edited: &Value, secrets: &SecretEditValues) -> Value {
+        restore_secret_tokens(edited, secrets)
+    }
+}
+
+fn schema_error(plugin_id: &str, path: &Path, message: impl std::fmt::Display) -> CliError {
+    CliError::Config(format!(
+        "dynamic plugin '{plugin_id}' config schema '{}': {message}",
+        path.display()
+    ))
+}
+
+fn parse_draft(
+    plugin_id: &str,
+    path: &Path,
+    schema: &Value,
+) -> Result<ConfigSchemaDraft, CliError> {
+    let Some(schema_object) = schema.as_object() else {
+        return Err(schema_error(
+            plugin_id,
+            path,
+            "schema document must be a JSON object",
+        ));
+    };
+    let Some(dialect) = schema_object.get("$schema") else {
+        return Err(schema_error(
+            plugin_id,
+            path,
+            "schema document must declare '$schema' as Draft 7 or Draft 2020-12",
+        ));
+    };
+    let Some(dialect) = dialect.as_str() else {
+        return Err(schema_error(plugin_id, path, "'$schema' must be a string"));
+    };
+    match dialect.trim_end_matches('#') {
+        DRAFT_7_URI | DRAFT_7_HTTPS_URI => Ok(ConfigSchemaDraft::Draft7),
+        DRAFT_2020_12_URI | DRAFT_2020_12_HTTP_URI => Ok(ConfigSchemaDraft::Draft202012),
+        _ => Err(schema_error(
+            plugin_id,
+            path,
+            format!(
+                "unsupported '$schema' value '{dialect}'; expected JSON Schema Draft 7 or Draft 2020-12"
+            ),
+        )),
+    }
+}
+
+fn reject_external_references(
+    plugin_id: &str,
+    path: &Path,
+    schema: &Value,
+) -> Result<(), CliError> {
+    fn visit_schema(
+        plugin_id: &str,
+        file_path: &Path,
+        schema: &Value,
+        pointer: &str,
+    ) -> Result<(), CliError> {
+        let Some(object) = schema.as_object() else {
+            return Ok(());
+        };
+        for key in ["$ref", "$dynamicRef"] {
+            if let Some(reference) = object.get(key).and_then(Value::as_str)
+                && !reference.starts_with('#')
+            {
+                return Err(schema_error(
+                    plugin_id,
+                    file_path,
+                    format!(
+                        "{key} at JSON pointer '{}' must be a local fragment reference beginning with '#', got '{reference}'",
+                        push_pointer(pointer, key)
+                    ),
+                ));
+            }
+        }
+
+        for key in [
+            "additionalItems",
+            "additionalProperties",
+            "contains",
+            "contentSchema",
+            "else",
+            "if",
+            "not",
+            "propertyNames",
+            "then",
+            "unevaluatedItems",
+            "unevaluatedProperties",
+        ] {
+            if let Some(child) = object.get(key) {
+                visit_schema(plugin_id, file_path, child, &push_pointer(pointer, key))?;
+            }
+        }
+
+        if let Some(items) = object.get("items") {
+            let items_pointer = push_pointer(pointer, "items");
+            if let Some(items) = items.as_array() {
+                for (index, child) in items.iter().enumerate() {
+                    visit_schema(
+                        plugin_id,
+                        file_path,
+                        child,
+                        &push_pointer(&items_pointer, &index.to_string()),
+                    )?;
+                }
+            } else {
+                visit_schema(plugin_id, file_path, items, &items_pointer)?;
+            }
+        }
+
+        for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+            if let Some(children) = object.get(key).and_then(Value::as_array) {
+                let children_pointer = push_pointer(pointer, key);
+                for (index, child) in children.iter().enumerate() {
+                    visit_schema(
+                        plugin_id,
+                        file_path,
+                        child,
+                        &push_pointer(&children_pointer, &index.to_string()),
+                    )?;
+                }
+            }
+        }
+
+        for key in [
+            "$defs",
+            "definitions",
+            "dependentSchemas",
+            "patternProperties",
+            "properties",
+        ] {
+            if let Some(children) = object.get(key).and_then(Value::as_object) {
+                let children_pointer = push_pointer(pointer, key);
+                for (name, child) in children {
+                    visit_schema(
+                        plugin_id,
+                        file_path,
+                        child,
+                        &push_pointer(&children_pointer, name),
+                    )?;
+                }
+            }
+        }
+
+        if let Some(dependencies) = object.get("dependencies").and_then(Value::as_object) {
+            let dependencies_pointer = push_pointer(pointer, "dependencies");
+            for (name, dependency) in dependencies {
+                if dependency.is_object() || dependency.is_boolean() {
+                    visit_schema(
+                        plugin_id,
+                        file_path,
+                        dependency,
+                        &push_pointer(&dependencies_pointer, name),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    visit_schema(plugin_id, path, schema, "")
+}
+
+fn validate_schema_document(
+    plugin_id: &str,
+    path: &Path,
+    draft: ConfigSchemaDraft,
+    schema: &Value,
+) -> Result<(), CliError> {
+    let result = match draft {
+        ConfigSchemaDraft::Draft7 => jsonschema::draft7::meta::validate(schema),
+        ConfigSchemaDraft::Draft202012 => jsonschema::draft202012::meta::validate(schema),
+    };
+    result.map_err(|error| {
+        schema_error(
+            plugin_id,
+            path,
+            format!(
+                "schema is invalid at JSON pointer '{}': {error}",
+                error.instance_path()
+            ),
+        )
+    })
+}
+
+fn build_object_fields(
+    plugin_id: &str,
+    path: &Path,
+    root: &Value,
+    schema: &Value,
+    reference_stack: &HashSet<String>,
+) -> Result<Vec<DynamicConfigField>, CliError> {
+    let Some(object) = schema.as_object() else {
+        return Ok(Vec::new());
+    };
+    let Some(properties) = object.get("properties") else {
+        return Ok(Vec::new());
+    };
+    let Some(properties) = properties.as_object() else {
+        return Err(schema_error(
+            plugin_id,
+            path,
+            "'properties' must be an object",
+        ));
+    };
+    let required = required_properties(object);
+    let property_names = ordered_property_names(plugin_id, path, object, properties)?;
+    property_names
+        .into_iter()
+        .map(|key| {
+            build_field(
+                plugin_id,
+                path,
+                root,
+                &key,
+                &properties[&key],
+                required.contains(key.as_str()),
+                reference_stack,
+            )
+        })
+        .collect()
+}
+
+fn required_properties(object: &Map<String, Value>) -> HashSet<&str> {
+    object
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+fn ordered_property_names(
+    plugin_id: &str,
+    path: &Path,
+    schema: &Map<String, Value>,
+    properties: &Map<String, Value>,
+) -> Result<Vec<String>, CliError> {
+    let mut alphabetical: Vec<String> = properties.keys().cloned().collect();
+    alphabetical.sort();
+    let Some(order) = schema.get("x-nemo-relay-order") else {
+        return Ok(alphabetical);
+    };
+    let Some(order) = order.as_array() else {
+        return Err(schema_error(
+            plugin_id,
+            path,
+            "'x-nemo-relay-order' must be an array of unique property names",
+        ));
+    };
+
+    let mut seen = HashSet::new();
+    let mut ordered = Vec::with_capacity(properties.len());
+    for value in order {
+        let Some(key) = value.as_str() else {
+            return Err(schema_error(
+                plugin_id,
+                path,
+                "'x-nemo-relay-order' must contain only strings",
+            ));
+        };
+        if !properties.contains_key(key) {
+            return Err(schema_error(
+                plugin_id,
+                path,
+                format!("'x-nemo-relay-order' names unknown property '{key}'"),
+            ));
+        }
+        if !seen.insert(key) {
+            return Err(schema_error(
+                plugin_id,
+                path,
+                format!("'x-nemo-relay-order' contains duplicate property '{key}'"),
+            ));
+        }
+        ordered.push(key.to_owned());
+    }
+    ordered.extend(
+        alphabetical
+            .into_iter()
+            .filter(|key| !seen.contains(key.as_str())),
+    );
+    Ok(ordered)
+}
+
+fn build_field(
+    plugin_id: &str,
+    path: &Path,
+    root: &Value,
+    key: &str,
+    schema: &Value,
+    required: bool,
+    reference_stack: &HashSet<String>,
+) -> Result<DynamicConfigField, CliError> {
+    let mut references = reference_stack.clone();
+    let resolved = match resolve_schema(root, schema, &mut references) {
+        Ok(schema) => schema,
+        Err(ResolveError::Cycle(_)) => {
+            return Ok(DynamicConfigField {
+                key: key.to_owned(),
+                title: annotation_string(schema, schema, "title").unwrap_or_else(|| key.to_owned()),
+                description: annotation_string(schema, schema, "description"),
+                default: schema.get("default").cloned(),
+                required,
+                kind: DynamicConfigFieldKind::RawJson,
+            });
+        }
+        Err(error) => {
+            return Err(schema_error(
+                plugin_id,
+                path,
+                format!("property '{key}' cannot be resolved: {error}"),
+            ));
+        }
+    };
+    let title = annotation_string(schema, resolved, "title").unwrap_or_else(|| key.to_owned());
+    let description = annotation_string(schema, resolved, "description");
+    let default = schema
+        .get("default")
+        .or_else(|| resolved.get("default"))
+        .cloned();
+    let secret = annotation_bool(schema, resolved, "writeOnly");
+    let kind = build_field_kind(plugin_id, path, root, resolved, secret, &references)?;
+
+    Ok(DynamicConfigField {
+        key: key.to_owned(),
+        title,
+        description,
+        default,
+        required,
+        kind,
+    })
+}
+
+fn build_field_kind(
+    plugin_id: &str,
+    path: &Path,
+    root: &Value,
+    schema: &Value,
+    secret: bool,
+    reference_stack: &HashSet<String>,
+) -> Result<DynamicConfigFieldKind, CliError> {
+    let Some(object) = schema.as_object() else {
+        return Ok(DynamicConfigFieldKind::RawJson);
+    };
+    if has_unsupported_shape_keywords(object) {
+        return Ok(DynamicConfigFieldKind::RawJson);
+    }
+    match schema_type(schema) {
+        Some("boolean") => Ok(DynamicConfigFieldKind::Boolean),
+        Some("string") => match object.get("enum") {
+            None => Ok(DynamicConfigFieldKind::String { secret }),
+            Some(Value::Array(values)) if values.iter().all(Value::is_string) => {
+                Ok(DynamicConfigFieldKind::StringEnum {
+                    options: values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                    secret,
+                })
+            }
+            Some(_) => Ok(DynamicConfigFieldKind::RawJson),
+        },
+        Some("integer") => Ok(DynamicConfigFieldKind::Integer),
+        Some("number") => Ok(DynamicConfigFieldKind::Number),
+        Some("object") => {
+            if object
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|properties| !properties.is_empty())
+            {
+                let fields = build_object_fields(plugin_id, path, root, schema, reference_stack)?;
+                Ok(DynamicConfigFieldKind::Object { fields })
+            } else if is_string_map(root, object, reference_stack) {
+                Ok(DynamicConfigFieldKind::StringMap)
+            } else {
+                Ok(DynamicConfigFieldKind::RawJson)
+            }
+        }
+        _ => Ok(DynamicConfigFieldKind::RawJson),
+    }
+}
+
+fn has_unsupported_shape_keywords(schema: &Map<String, Value>) -> bool {
+    [
+        "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "const",
+    ]
+    .iter()
+    .any(|keyword| schema.contains_key(*keyword))
+}
+
+fn is_string_map(
+    root: &Value,
+    schema: &Map<String, Value>,
+    reference_stack: &HashSet<String>,
+) -> bool {
+    if schema.contains_key("patternProperties")
+        || schema.contains_key("propertyNames")
+        || schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| !properties.is_empty())
+    {
+        return false;
+    }
+    let Some(additional) = schema.get("additionalProperties") else {
+        return false;
+    };
+    let mut references = reference_stack.clone();
+    resolve_schema(root, additional, &mut references)
+        .is_ok_and(|resolved| schema_type(resolved) == Some("string"))
+}
+
+fn schema_type(schema: &Value) -> Option<&str> {
+    schema.get("type").and_then(Value::as_str)
+}
+
+fn annotation_string(primary: &Value, resolved: &Value, key: &str) -> Option<String> {
+    primary
+        .get(key)
+        .or_else(|| resolved.get(key))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn annotation_bool(primary: &Value, resolved: &Value, key: &str) -> bool {
+    primary
+        .get(key)
+        .or_else(|| resolved.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+#[derive(Debug)]
+enum ResolveError {
+    Missing(String),
+    Cycle(String),
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(reference) => {
+                write!(formatter, "local reference '{reference}' was not found")
+            }
+            Self::Cycle(reference) => write!(formatter, "local reference '{reference}' is cyclic"),
+        }
+    }
+}
+
+fn resolve_schema<'a>(
+    root: &'a Value,
+    schema: &'a Value,
+    references: &mut HashSet<String>,
+) -> Result<&'a Value, ResolveError> {
+    let Some(reference) = schema.get("$ref").and_then(Value::as_str) else {
+        return Ok(schema);
+    };
+    if !references.insert(reference.to_owned()) {
+        return Err(ResolveError::Cycle(reference.to_owned()));
+    }
+    let target = resolve_fragment(root, reference)
+        .ok_or_else(|| ResolveError::Missing(reference.to_owned()))?;
+    resolve_schema(root, target, references)
+}
+
+fn resolve_fragment<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    if reference == "#" {
+        return Some(root);
+    }
+    if let Some(pointer) = reference.strip_prefix('#')
+        && pointer.starts_with('/')
+    {
+        return root.pointer(pointer);
+    }
+    let anchor = reference.strip_prefix('#')?;
+    find_anchor(root, anchor)
+}
+
+fn find_anchor<'a>(schema: &'a Value, anchor: &str) -> Option<&'a Value> {
+    match schema {
+        Value::Object(object) => {
+            if object.get("$anchor").and_then(Value::as_str) == Some(anchor)
+                || object.get("$id").and_then(Value::as_str) == Some(&format!("#{anchor}"))
+            {
+                return Some(schema);
+            }
+            object.values().find_map(|child| find_anchor(child, anchor))
+        }
+        Value::Array(values) => values.iter().find_map(|child| find_anchor(child, anchor)),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SecretSegment {
+    Property(String),
+    Any,
+    Pattern(String),
+    Index(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SecretPattern(Vec<SecretSegment>);
+
+impl SecretPattern {
+    #[cfg(test)]
+    fn display(&self) -> String {
+        let mut pointer = String::new();
+        for segment in &self.0 {
+            pointer.push('/');
+            match segment {
+                SecretSegment::Property(property) => pointer.push_str(&escape_pointer(property)),
+                SecretSegment::Any => pointer.push('*'),
+                SecretSegment::Pattern(pattern) => {
+                    pointer.push_str(&format!("~pattern({pattern})"))
+                }
+                SecretSegment::Index(index) => pointer.push_str(&index.to_string()),
+            }
+        }
+        pointer
+    }
+
+    fn redact(&self, value: &mut Value, offset: usize) {
+        if offset == self.0.len() {
+            if value.is_string() {
+                *value = Value::String(REDACTED.to_owned());
+            }
+            return;
+        }
+        match &self.0[offset] {
+            SecretSegment::Property(property) => {
+                if let Some(child) = value.get_mut(property) {
+                    self.redact(child, offset + 1);
+                }
+            }
+            SecretSegment::Any => match value {
+                Value::Object(object) => {
+                    for child in object.values_mut() {
+                        self.redact(child, offset + 1);
+                    }
+                }
+                Value::Array(values) => {
+                    for child in values {
+                        self.redact(child, offset + 1);
+                    }
+                }
+                _ => {}
+            },
+            SecretSegment::Pattern(pattern) => {
+                if let Value::Object(object) = value {
+                    for (key, child) in object {
+                        if pattern_matches(pattern, key) {
+                            self.redact(child, offset + 1);
+                        }
+                    }
+                }
+            }
+            SecretSegment::Index(index) => {
+                if let Some(child) = value.get_mut(*index) {
+                    self.redact(child, offset + 1);
+                }
+            }
+        }
+    }
+
+    fn redact_for_edit(
+        &self,
+        value: &mut Value,
+        offset: usize,
+        secrets: &mut SecretEditValues,
+        occupied: &HashSet<String>,
+        next_token: &mut usize,
+    ) {
+        if offset == self.0.len() {
+            if !value.is_string() {
+                return;
+            }
+            if value
+                .as_str()
+                .is_some_and(|candidate| secrets.contains_key(candidate))
+            {
+                return;
+            }
+            let token = next_secret_token(secrets, occupied, next_token);
+            secrets.insert(token.clone(), value.clone());
+            *value = Value::String(token);
+            return;
+        }
+        match &self.0[offset] {
+            SecretSegment::Property(property) => {
+                if let Some(child) = value.get_mut(property) {
+                    self.redact_for_edit(child, offset + 1, secrets, occupied, next_token);
+                }
+            }
+            SecretSegment::Any => match value {
+                Value::Object(object) => {
+                    for child in object.values_mut() {
+                        self.redact_for_edit(child, offset + 1, secrets, occupied, next_token);
+                    }
+                }
+                Value::Array(values) => {
+                    for child in values {
+                        self.redact_for_edit(child, offset + 1, secrets, occupied, next_token);
+                    }
+                }
+                _ => {}
+            },
+            SecretSegment::Pattern(pattern) => {
+                if let Value::Object(object) = value {
+                    for (key, child) in object {
+                        if pattern_matches(pattern, key) {
+                            self.redact_for_edit(child, offset + 1, secrets, occupied, next_token);
+                        }
+                    }
+                }
+            }
+            SecretSegment::Index(index) => {
+                if let Some(child) = value.get_mut(*index) {
+                    self.redact_for_edit(child, offset + 1, secrets, occupied, next_token);
+                }
+            }
+        }
+    }
+
+    fn applies_below(&self, path: &[String]) -> bool {
+        self.0.len() >= path.len()
+            && self
+                .0
+                .iter()
+                .zip(path)
+                .all(|(segment, property)| match segment {
+                    SecretSegment::Property(expected) => expected == property,
+                    SecretSegment::Any => true,
+                    SecretSegment::Pattern(pattern) => pattern_matches(pattern, property),
+                    SecretSegment::Index(index) => property.parse::<usize>() == Ok(*index),
+                })
+    }
+}
+
+fn pattern_matches(pattern: &str, property: &str) -> bool {
+    regex::Regex::new(pattern)
+        .map(|pattern| pattern.is_match(property))
+        .unwrap_or(true)
+}
+
+fn collect_string_values(value: &Value, output: &mut HashSet<String>) {
+    match value {
+        Value::String(value) => {
+            output.insert(value.clone());
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_string_values(value, output);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_string_values(value, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn next_secret_token(
+    secrets: &SecretEditValues,
+    occupied: &HashSet<String>,
+    next_token: &mut usize,
+) -> String {
+    loop {
+        let token = format!("{EDIT_REDACTED_PREFIX}{}>", *next_token);
+        *next_token += 1;
+        if !secrets.contains_key(&token) && !occupied.contains(&token) {
+            return token;
+        }
+    }
+}
+
+fn restore_secret_tokens(value: &Value, secrets: &SecretEditValues) -> Value {
+    match value {
+        Value::String(value) => secrets
+            .get(value)
+            .cloned()
+            .unwrap_or_else(|| Value::String(value.clone())),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| restore_secret_tokens(value, secrets))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), restore_secret_tokens(value, secrets)))
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
+fn discover_secret_patterns(
+    root: &Value,
+    schema: &Value,
+    instance_path: &[SecretSegment],
+    reference_stack: &HashSet<String>,
+    output: &mut Vec<SecretPattern>,
+) {
+    let mut references = reference_stack.clone();
+    let resolved = match resolve_schema(root, schema, &mut references) {
+        Ok(resolved) => resolved,
+        Err(_) => return,
+    };
+    if schema_type(resolved) == Some("string") && annotation_bool(schema, resolved, "writeOnly") {
+        output.push(SecretPattern(instance_path.to_vec()));
+        return;
+    }
+    let Some(object) = resolved.as_object() else {
+        return;
+    };
+
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        for (property, child_schema) in properties {
+            let mut child_path = instance_path.to_vec();
+            child_path.push(SecretSegment::Property(property.clone()));
+            discover_secret_patterns(root, child_schema, &child_path, &references, output);
+        }
+    }
+    if let Some(additional) = object.get("additionalProperties")
+        && additional.is_object()
+    {
+        let mut child_path = instance_path.to_vec();
+        child_path.push(SecretSegment::Any);
+        discover_secret_patterns(root, additional, &child_path, &references, output);
+    }
+    if let Some(patterns) = object.get("patternProperties").and_then(Value::as_object) {
+        for (pattern, child_schema) in patterns {
+            let mut child_path = instance_path.to_vec();
+            child_path.push(SecretSegment::Pattern(pattern.clone()));
+            discover_secret_patterns(root, child_schema, &child_path, &references, output);
+        }
+    }
+    if let Some(items) = object.get("items")
+        && items.is_object()
+    {
+        let mut child_path = instance_path.to_vec();
+        child_path.push(SecretSegment::Any);
+        discover_secret_patterns(root, items, &child_path, &references, output);
+    }
+    if let Some(prefix_items) = object.get("prefixItems").and_then(Value::as_array) {
+        for (index, child_schema) in prefix_items.iter().enumerate() {
+            let mut child_path = instance_path.to_vec();
+            child_path.push(SecretSegment::Index(index));
+            discover_secret_patterns(root, child_schema, &child_path, &references, output);
+        }
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(branches) = object.get(keyword).and_then(Value::as_array) {
+            for branch in branches {
+                discover_secret_patterns(root, branch, instance_path, &references, output);
+            }
+        }
+    }
+    for keyword in ["if", "then", "else", "not"] {
+        if let Some(branch) = object.get(keyword)
+            && branch.is_object()
+        {
+            discover_secret_patterns(root, branch, instance_path, &references, output);
+        }
+    }
+    if let Some(contains) = object.get("contains")
+        && contains.is_object()
+    {
+        let mut child_path = instance_path.to_vec();
+        child_path.push(SecretSegment::Any);
+        discover_secret_patterns(root, contains, &child_path, &references, output);
+    }
+}
+
+fn push_pointer(pointer: &str, segment: &str) -> String {
+    format!("{pointer}/{}", escape_pointer(segment))
+}
+
+fn escape_pointer(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    const DRAFT7: &str = "http://json-schema.org/draft-07/schema#";
+    const DRAFT2020: &str = "https://json-schema.org/draft/2020-12/schema";
+
+    fn write_schema(schema: &Value) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempdir().expect("create temp directory");
+        let path = directory.path().join("config.schema.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(schema).expect("serialize schema"),
+        )
+        .expect("write schema");
+        (directory, path)
+    }
+
+    fn load(schema: &Value) -> PluginConfigSchema {
+        let (_directory, path) = write_schema(schema);
+        PluginConfigSchema::load("acme.example", path).expect("load schema")
+    }
+
+    #[test]
+    fn loads_supported_drafts_and_requires_object_root() {
+        for (dialect, expected) in [
+            (DRAFT7, ConfigSchemaDraft::Draft7),
+            (DRAFT2020, ConfigSchemaDraft::Draft202012),
+        ] {
+            let loaded = load(&json!({"$schema": dialect, "type": "object"}));
+            assert_eq!(loaded.draft(), expected);
+            assert_eq!(loaded.plugin_id(), "acme.example");
+            assert_eq!(loaded.source()["type"], "object");
+            assert!(loaded.path().ends_with("config.schema.json"));
+        }
+
+        let (_directory, path) = write_schema(&json!({
+            "$schema": DRAFT2020,
+            "type": "string"
+        }));
+        let error = PluginConfigSchema::load("acme.bad", &path).expect_err("reject string root");
+        let message = error.to_string();
+        assert!(message.contains("acme.bad"), "{message}");
+        assert!(
+            message.contains(path.to_string_lossy().as_ref()),
+            "{message}"
+        );
+        assert!(message.contains("root schema"), "{message}");
+    }
+
+    #[test]
+    fn requires_supported_explicit_dialect() {
+        for schema in [
+            json!({"type": "object"}),
+            json!({"$schema": 7, "type": "object"}),
+            json!({"$schema": "https://json-schema.org/draft/2019-09/schema", "type": "object"}),
+        ] {
+            let (_directory, path) = write_schema(&schema);
+            let error = PluginConfigSchema::load("acme.bad", path).expect_err("reject dialect");
+            assert!(error.to_string().contains("$schema"));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_schema_and_external_references_recursively() {
+        let (_directory, path) = write_schema(&json!({
+            "$schema": DRAFT7,
+            "type": 7
+        }));
+        let error = PluginConfigSchema::load("acme.bad", path).expect_err("reject invalid schema");
+        assert!(error.to_string().contains("schema is invalid"));
+
+        let (_directory, path) = write_schema(&json!({
+            "$schema": DRAFT2020,
+            "type": "object",
+            "$defs": {
+                "remote": {"$ref": "https://example.com/schema.json"}
+            }
+        }));
+        let error = PluginConfigSchema::load("acme.bad", path).expect_err("reject external ref");
+        let message = error.to_string();
+        assert!(message.contains("local fragment"), "{message}");
+        assert!(message.contains("/$defs/remote/$ref"), "{message}");
+
+        load(&json!({
+            "$schema": DRAFT2020,
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "default": {"$ref": "https://example.com/literal-data"},
+                    "examples": [{"$ref": "https://example.com/also-literal"}]
+                }
+            }
+        }));
+    }
+
+    #[test]
+    fn resolves_local_definitions_for_root_and_fields() {
+        let loaded = load(&json!({
+            "$schema": DRAFT2020,
+            "$ref": "#/$defs/config",
+            "$defs": {
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "endpoint": {"$ref": "#/$defs/nonEmpty"}
+                    }
+                },
+                "nonEmpty": {"type": "string", "minLength": 1}
+            }
+        }));
+        assert_eq!(loaded.fields().len(), 1);
+        assert!(matches!(
+            loaded.fields()[0].kind,
+            DynamicConfigFieldKind::String { secret: false }
+        ));
+        loaded
+            .validate(&json!({"endpoint": "relay"}))
+            .expect("valid config");
+    }
+
+    #[test]
+    fn maps_native_nested_map_and_raw_controls() {
+        let loaded = load(&json!({
+            "$schema": DRAFT2020,
+            "type": "object",
+            "required": ["enabled"],
+            "properties": {
+                "array": {"type": "array", "items": {"type": "string"}},
+                "choice": {"type": "string", "enum": ["one", "two"]},
+                "count": {"type": "integer"},
+                "enabled": {"type": "boolean", "title": "Enabled", "default": true},
+                "free": {"type": "object"},
+                "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+                "nested": {
+                    "type": "object",
+                    "properties": {"ratio": {"type": "number", "description": "Weight"}}
+                },
+                "secret": {"type": "string", "writeOnly": true},
+                "union": {"oneOf": [{"type": "string"}, {"type": "number"}]}
+            }
+        }));
+        let field = |key: &str| {
+            loaded
+                .fields()
+                .iter()
+                .find(|field| field.key == key)
+                .unwrap()
+        };
+
+        assert!(matches!(
+            field("array").kind,
+            DynamicConfigFieldKind::RawJson
+        ));
+        assert!(matches!(
+            field("free").kind,
+            DynamicConfigFieldKind::RawJson
+        ));
+        assert!(matches!(
+            field("union").kind,
+            DynamicConfigFieldKind::RawJson
+        ));
+        assert!(matches!(
+            field("count").kind,
+            DynamicConfigFieldKind::Integer
+        ));
+        assert!(matches!(
+            field("labels").kind,
+            DynamicConfigFieldKind::StringMap
+        ));
+        assert!(matches!(
+            field("secret").kind,
+            DynamicConfigFieldKind::String { secret: true }
+        ));
+        assert_eq!(field("enabled").title, "Enabled");
+        assert_eq!(field("enabled").default, Some(json!(true)));
+        assert!(field("enabled").required);
+        assert!(matches!(
+            field("choice").kind,
+            DynamicConfigFieldKind::StringEnum { ref options, secret: false }
+                if options == &["one", "two"]
+        ));
+        assert!(matches!(
+            field("nested").kind,
+            DynamicConfigFieldKind::Object { ref fields }
+                if fields.len() == 1
+                    && fields[0].key == "ratio"
+                    && fields[0].description.as_deref() == Some("Weight")
+                    && matches!(fields[0].kind, DynamicConfigFieldKind::Number)
+        ));
+        assert!(loaded.editor().title.is_none());
+    }
+
+    #[test]
+    fn applies_partial_explicit_order_then_alphabetical_fallback() {
+        let loaded = load(&json!({
+            "$schema": DRAFT7,
+            "type": "object",
+            "x-nemo-relay-order": ["zeta", "middle"],
+            "properties": {
+                "zeta": {"type": "string"},
+                "alpha": {"type": "string"},
+                "middle": {"type": "string"},
+                "beta": {"type": "string"}
+            }
+        }));
+        assert_eq!(
+            loaded
+                .fields()
+                .iter()
+                .map(|field| field.key.as_str())
+                .collect::<Vec<_>>(),
+            ["zeta", "middle", "alpha", "beta"]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_explicit_order() {
+        for order in [
+            json!("alpha"),
+            json!(["missing"]),
+            json!(["alpha", "alpha"]),
+            json!([1]),
+        ] {
+            let (_directory, path) = write_schema(&json!({
+                "$schema": DRAFT2020,
+                "type": "object",
+                "x-nemo-relay-order": order,
+                "properties": {"alpha": {"type": "string"}}
+            }));
+            let error = PluginConfigSchema::load("acme.bad", path).expect_err("reject order");
+            assert!(error.to_string().contains("x-nemo-relay-order"));
+        }
+    }
+
+    #[test]
+    fn validation_error_names_plugin_and_instance_pointer() {
+        let loaded = load(&json!({
+            "$schema": DRAFT2020,
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "object",
+                    "properties": {"port": {"type": "integer", "minimum": 1}}
+                }
+            }
+        }));
+        let error = loaded
+            .validate(&json!({"service": {"port": 0}}))
+            .expect_err("reject invalid config");
+        let message = error.to_string();
+        assert!(message.contains("acme.example"), "{message}");
+        assert!(message.contains("/service/port"), "{message}");
+    }
+
+    #[test]
+    fn recursively_discovers_and_redacts_write_only_strings() {
+        let loaded = load(&json!({
+            "$schema": DRAFT2020,
+            "type": "object",
+            "properties": {
+                "token": {"$ref": "#/$defs/secret"},
+                "nested": {
+                    "type": "object",
+                    "properties": {"password": {"type": "string", "writeOnly": true}}
+                },
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"key": {"type": "string", "writeOnly": true}}
+                    }
+                }
+            },
+            "$defs": {"secret": {"type": "string", "writeOnly": true}}
+        }));
+        assert_eq!(
+            loaded.secret_paths(),
+            &["/nested/password", "/records/*/key", "/token"]
+        );
+        let config = json!({
+            "token": "top-secret",
+            "nested": {"password": "hunter2", "visible": "ok"},
+            "records": [{"key": "one"}, {"key": "two"}]
+        });
+        assert_eq!(
+            loaded.redact(&config),
+            json!({
+                "token": REDACTED,
+                "nested": {"password": REDACTED, "visible": "ok"},
+                "records": [{"key": REDACTED}, {"key": REDACTED}]
+            })
+        );
+        assert_eq!(config["token"], "top-secret", "redaction must clone");
+
+        let (redacted, secrets) = loaded.redact_for_edit(&config);
+        assert_eq!(loaded.restore_edit_secrets(&redacted, &secrets), config);
+
+        let mut replacement = redacted;
+        replacement["token"] = json!("replacement");
+        replacement["nested"]
+            .as_object_mut()
+            .unwrap()
+            .remove("password");
+        replacement["records"].as_array_mut().unwrap().swap(0, 1);
+        let restored = loaded.restore_edit_secrets(&replacement, &secrets);
+        assert_eq!(restored["token"], json!("replacement"));
+        assert!(restored["nested"].get("password").is_none());
+        assert_eq!(restored["records"], json!([{"key": "two"}, {"key": "one"}]));
+    }
+
+    #[test]
+    fn secret_discovery_preserves_pattern_prefix_and_contains_selectors() {
+        let loaded = load(&json!({
+            "$schema": DRAFT2020,
+            "type": "object",
+            "properties": {
+                "patterned": {
+                    "type": "object",
+                    "patternProperties": {
+                        "^secret_": {"type": "string", "writeOnly": true}
+                    }
+                },
+                "tuple": {
+                    "type": "array",
+                    "prefixItems": [
+                        {"type": "string", "writeOnly": true},
+                        {"type": "string"}
+                    ]
+                },
+                "contained": {
+                    "type": "array",
+                    "contains": {"type": "string", "writeOnly": true}
+                }
+            }
+        }));
+        let config = json!({
+            "patterned": {"secret_token": "hide", "public": "show"},
+            "tuple": ["hide", "show"],
+            "contained": ["hide-one", 7, "hide-two"]
+        });
+        assert_eq!(
+            loaded.redact(&config),
+            json!({
+                "patterned": {"secret_token": REDACTED, "public": "show"},
+                "tuple": [REDACTED, "show"],
+                "contained": [REDACTED, 7, REDACTED]
+            })
+        );
+        assert!(loaded.has_secrets_at(&["patterned".to_owned()]));
+        assert!(loaded.has_secrets_at(&["tuple".to_owned()]));
+        assert!(loaded.has_secrets_at(&["contained".to_owned()]));
+    }
+
+    #[test]
+    fn read_and_json_errors_include_plugin_and_path() {
+        let directory = tempdir().expect("create temp directory");
+        let missing = directory.path().join("missing.json");
+        let error = PluginConfigSchema::load("acme.missing", &missing).expect_err("missing");
+        let message = error.to_string();
+        assert!(message.contains("acme.missing"), "{message}");
+        assert!(
+            message.contains(missing.to_string_lossy().as_ref()),
+            "{message}"
+        );
+
+        let invalid = directory.path().join("invalid.json");
+        fs::write(&invalid, "{").expect("write invalid json");
+        let error = PluginConfigSchema::load("acme.invalid", &invalid).expect_err("invalid json");
+        assert!(error.to_string().contains("not valid JSON"));
+    }
+}
