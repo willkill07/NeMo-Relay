@@ -245,11 +245,11 @@ a worker. `nemo-relay plugins add`, `nemo-relay plugins validate`, and
 Declare `$schema` as JSON Schema Draft 7 or Draft 2020-12, and describe an
 object at the schema root. Only standard same-document fragment references
 beginning with `#`, such as `#/$defs/auth`, are supported. Dynamic references,
-relative files, network URLs, and file URLs in `$ref` are not supported. The
-editor provides structured controls for booleans, strings, numbers, string
-enums, nested objects, and string-valued maps. It uses a raw JSON control for
-arrays, unions, and other complex values, then validates the result against the
-complete schema before saving.
+recursive reference cycles, relative files, network URLs, and file URLs in
+`$ref` are not supported. The editor provides structured controls for
+booleans, strings, numbers, string enums, nested objects, and string-valued
+maps. It uses a raw JSON control for arrays, unions, and other complex values,
+then validates the result against the complete schema before saving.
 
 Use JSON Schema keywords and the NeMo Relay editor extension to improve the
 editor:

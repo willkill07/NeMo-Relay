@@ -1195,7 +1195,11 @@ fn discover_secret_patterns(
     let mut references = reference_stack.clone();
     let resolved = match resolve_schema(root, schema, &mut references) {
         Ok(resolved) => resolved,
-        Err(_) => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "secret schema reference could not be resolved: {error}"
+            ));
+        }
     };
     if schema_type(resolved) == Some("string") && annotation_bool(schema, resolved, "writeOnly") {
         output.push(SecretPattern(instance_path.to_vec()));
@@ -1899,6 +1903,32 @@ mod tests {
             assert!(message.contains(keyword), "{message}");
             assert!(message.contains("writeOnly"), "{message}");
         }
+    }
+
+    #[test]
+    fn rejects_recursive_references_that_secret_discovery_cannot_safely_expand() {
+        let (_directory, path) = write_schema(&json!({
+            "$schema": DRAFT2020,
+            "type": "object",
+            "properties": {
+                "node": {"$ref": "#/$defs/node"}
+            },
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "properties": {
+                        "token": {"type": "string", "writeOnly": true},
+                        "next": {"$ref": "#/$defs/node"}
+                    }
+                }
+            }
+        }));
+
+        let error = PluginConfigSchema::load("acme.recursive", path)
+            .expect_err("reject recursive secret schema reference");
+        let message = error.to_string();
+        assert!(message.contains("secret schema reference"), "{message}");
+        assert!(message.contains("cyclic"), "{message}");
     }
 
     #[test]
