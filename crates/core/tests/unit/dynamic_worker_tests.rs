@@ -34,9 +34,8 @@ fn python_environment_resolution_requires_lifecycle_managed_path() {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let managed = std::env::temp_dir()
-        .join(MANAGED_ENVIRONMENTS_DIR)
-        .join(digest);
+    let temp = tempfile::tempdir().unwrap();
+    let managed = temp.path().join(MANAGED_ENVIRONMENTS_DIR).join(digest);
     let python = resolve_python_executable(plugin_id, managed.to_str()).unwrap();
     assert!(python.starts_with(&managed));
 
@@ -48,6 +47,20 @@ fn python_environment_resolution_requires_lifecycle_managed_path() {
             .to_string()
             .contains("is not the lifecycle-managed path")
     );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let target = temp.path().join("symlink-target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        symlink(&target, &managed).unwrap();
+
+        let error = resolve_python_executable(plugin_id, managed.to_str())
+            .expect_err("a symlinked environment should be rejected");
+        assert!(error.to_string().contains("must not be a symbolic link"));
+    }
 }
 
 #[test]
