@@ -100,6 +100,10 @@ pub struct WorkerPluginLoadSpec {
     pub plugin_id: String,
     /// Path to the authored `relay-plugin.toml`.
     pub manifest_ref: String,
+    /// Relay-managed per-plugin runtime environment.
+    ///
+    /// This is required for Python workers and ignored by other worker runtimes.
+    pub environment_ref: Option<String>,
     /// Resolved dynamic plugin config passed to the worker.
     pub config: Map<String, Json>,
 }
@@ -306,6 +310,7 @@ fn load_one_worker_plugin(
     let mut child = ChildGuard::new(spawn_worker_process(WorkerProcessLaunch {
         runtime,
         manifest_path: &manifest_path,
+        environment_ref: spec.environment_ref.as_deref(),
         plugin_id: &spec.plugin_id,
         entrypoint,
         activation_id: &activation_id,
@@ -669,6 +674,7 @@ async fn connect_worker(
 struct WorkerProcessLaunch<'a> {
     runtime: WorkerRuntime,
     manifest_path: &'a Path,
+    environment_ref: Option<&'a str>,
     plugin_id: &'a str,
     entrypoint: &'a str,
     activation_id: &'a str,
@@ -685,7 +691,13 @@ fn spawn_worker_process(spec: WorkerProcessLaunch<'_>) -> crate::plugin::Result<
         .unwrap_or_else(|| Path::new("."));
     let (mut command, command_display) = match spec.runtime {
         WorkerRuntime::Python => {
-            let python = std::env::var("NEMO_RELAY_PYTHON").unwrap_or_else(|_| "python3".into());
+            let python = resolve_python_executable(spec.environment_ref)?;
+            if !python.is_file() {
+                return Err(PluginError::RegistrationFailed(format!(
+                    "configured Python worker environment interpreter '{}' does not exist",
+                    python.display()
+                )));
+            }
             let mut command = Command::new(python);
             command
                 .arg("-c")
@@ -717,6 +729,21 @@ fn spawn_worker_process(spec: WorkerProcessLaunch<'_>) -> crate::plugin::Result<
             "failed to spawn {} worker '{}': {err}",
             spec.runtime, command_display
         ))
+    })
+}
+
+fn resolve_python_executable(environment_ref: Option<&str>) -> crate::plugin::Result<PathBuf> {
+    let environment_ref = environment_ref.ok_or_else(|| {
+        PluginError::InvalidConfig(
+            "Python worker activation requires a lifecycle-managed environment_ref; run `nemo-relay plugins add <path>`"
+                .into(),
+        )
+    })?;
+    let environment = Path::new(environment_ref);
+    Ok(if cfg!(windows) {
+        environment.join("Scripts").join("python.exe")
+    } else {
+        environment.join("bin").join("python")
     })
 }
 

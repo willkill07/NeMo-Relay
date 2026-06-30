@@ -45,6 +45,7 @@ from nemo_relay_plugin._api import (  # noqa: E402
     _decode_required_envelope,
     _grpc_target,
     _json_envelope,
+    _open_host_channel,
     _required_env,
     _unlink_unix_socket,
     _WorkerService,
@@ -1512,6 +1513,28 @@ def test_required_environment_reports_missing_value(monkeypatch: pytest.MonkeyPa
         _required_env("NEMO_RELAY_WORKER_SOCKET")
 
 
+def test_unix_host_channel_uses_valid_authority(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+
+    def insecure_channel(
+        target: str,
+        *,
+        options: tuple[tuple[str, str], ...] = (),
+    ) -> object:
+        calls.append((target, options))
+        return object()
+
+    monkeypatch.setattr(plugin_api.grpc.aio, "insecure_channel", insecure_channel)
+
+    _open_host_channel("unix:///tmp/relay-host.sock")
+    _open_host_channel("http://127.0.0.1:50051")
+
+    assert calls == [
+        ("unix:/tmp/relay-host.sock", (("grpc.default_authority", "localhost"),)),
+        ("127.0.0.1:50051", ()),
+    ]
+
+
 async def test_endpoint_helpers_normalize_and_refuse_non_socket_unix_targets(tmp_path: Any):
     assert _grpc_target("tcp://127.0.0.1:50051") == "127.0.0.1:50051"
     assert _grpc_target("http://127.0.0.1:50051") == "127.0.0.1:50051"
@@ -1656,7 +1679,7 @@ async def test_unlink_unix_socket_removes_an_existing_socket():
 async def test_unlink_unix_socket_refuses_an_active_socket():
     with tempfile.TemporaryDirectory(prefix="nr-plugin-", dir="/tmp") as directory:
         socket_path = Path(directory) / "active.sock"
-        server = await asyncio.start_unix_server(lambda reader, writer: None, path=socket_path)
+        server = await asyncio.start_unix_server(lambda _reader, writer: writer.close(), path=socket_path)
         try:
             with pytest.raises(WorkerSdkError, match="already active"):
                 await _unlink_unix_socket(f"unix://{socket_path}")

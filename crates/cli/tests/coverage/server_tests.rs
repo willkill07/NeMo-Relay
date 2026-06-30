@@ -1735,6 +1735,7 @@ async fn serve_listener_with_dynamic_reports_native_load_errors() {
             plugin_id: "cli.missing-native".into(),
             kind: DynamicPluginKind::RustDynamic,
             manifest_ref: Some(manifest_ref.to_string_lossy().into_owned()),
+            environment_ref: None,
             config: Map::new(),
         }],
         Some(shutdown_rx),

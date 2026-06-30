@@ -267,6 +267,7 @@ impl PluginActivation {
                 Ok(WorkerPluginLoadSpec {
                     plugin_id: plugin.plugin_id.clone(),
                     manifest_ref,
+                    environment_ref: plugin.environment_ref.clone(),
                     config: plugin.config.clone(),
                 })
             })
