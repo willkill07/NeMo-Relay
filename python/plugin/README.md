@@ -43,6 +43,19 @@ package is built; they are included in installed wheels but are not committed
 to the source repository. Installing the published wheel never requires
 `protoc` or `grpcio-tools`.
 
+## Callback Concurrency
+
+The gRPC AsyncIO server can keep multiple RPCs in flight. Callback execution is
+cooperative: asynchronous callbacks overlap only when they yield control at an
+`await`. Synchronous callbacks and synchronous stream iterators run on the
+worker event-loop thread. Blocking I/O, `time.sleep`, or long-running CPU work
+in those callbacks stalls all worker RPCs. Wrap blocking work in an
+asynchronous callback and offload it with `asyncio.to_thread()` or another
+appropriate executor.
+
+The SDK does not configure `maximum_concurrent_rpcs`, so gRPC does not enforce
+an application-level RPC admission limit.
+
 Windows ARM64 is not currently supported because `grpcio` does not publish a
 usable wheel for that platform. The NeMo Relay workspace skips installation and
 tests for this SDK on Windows ARM64 rather than creating a package without its

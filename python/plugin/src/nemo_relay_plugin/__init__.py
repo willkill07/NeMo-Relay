@@ -8,6 +8,13 @@ then pass the implementation to :func:`serve_plugin`. The SDK owns the
 ``grpc-v1`` transport, host authentication, JSON envelopes, continuation calls,
 and task-local scope-stack propagation.
 
+The worker can keep multiple RPCs in flight, but callback execution is
+cooperative. Asynchronous callbacks overlap only when they yield control at an
+``await``. Synchronous callbacks run on the worker event-loop thread and must
+not perform blocking I/O or long-running CPU work. Wrap blocking work in an
+asynchronous callback and offload it with :func:`asyncio.to_thread` or another
+appropriate executor.
+
 Public data types:
     Json: Any JSON-serializable Python value.
     Event: A Relay event represented as a JSON object.

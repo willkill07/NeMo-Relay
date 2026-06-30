@@ -5,7 +5,9 @@
 
 The module exposes the authoring contract for out-of-process Python plugins.
 Callbacks can be synchronous or asynchronous unless a method documents a more
-specific return type. Callback exceptions are returned to the Relay host as
+specific return type. Synchronous callbacks run on the worker event-loop thread
+and must not block. Asynchronous callbacks overlap only when they yield control
+at an ``await``. Callback exceptions are returned to the Relay host as
 structured worker errors.
 
 Public data types:
@@ -1099,6 +1101,18 @@ async def serve_plugin(plugin: _SupportsWorkerPlugin) -> None:
     Optional environment variables:
         ``NEMO_RELAY_WORKER_ENDPOINT_FILE``: File where the SDK writes the
         resolved worker endpoint after the gRPC server is accepting requests.
+
+    Callback concurrency:
+        The gRPC AsyncIO server can keep multiple RPCs in flight. Asynchronous
+        callbacks overlap only when they yield control at an ``await``.
+        Synchronous callbacks and synchronous stream iterators run on the
+        worker event-loop thread. Blocking I/O, ``time.sleep``, or long-running
+        CPU work in those callbacks stalls all worker RPCs. Wrap blocking work
+        in an asynchronous callback and offload it with
+        :func:`asyncio.to_thread` or another appropriate executor.
+
+        The SDK does not configure ``maximum_concurrent_rpcs``, so gRPC does
+        not enforce an application-level RPC admission limit.
 
     Raises:
         WorkerSdkError: A required environment variable is empty or missing, or
