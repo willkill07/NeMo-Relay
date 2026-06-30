@@ -6,6 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ const DRAFT_2020_12_URI: &str = "https://json-schema.org/draft/2020-12/schema";
 const DRAFT_2020_12_HTTP_URI: &str = "http://json-schema.org/draft/2020-12/schema";
 const REDACTED: &str = "<redacted>";
 const EDIT_REDACTED_PREFIX: &str = "<redacted:nemo-relay:";
+const MAX_CONFIG_SCHEMA_BYTES: u64 = 1024 * 1024;
 
 pub(super) type SecretEditValues = BTreeMap<String, SecretEditValue>;
 
@@ -103,10 +105,8 @@ impl PluginConfigSchema {
     ) -> Result<Self, CliError> {
         let plugin_id = plugin_id.into();
         let path = path.as_ref().to_path_buf();
-        let contents = fs::read_to_string(&path).map_err(|error| {
-            schema_error(&plugin_id, &path, format!("failed to read schema: {error}"))
-        })?;
-        let source: Value = serde_json::from_str(&contents).map_err(|error| {
+        let contents = read_schema_file(&plugin_id, &path)?;
+        let source: Value = serde_json::from_slice(&contents).map_err(|error| {
             schema_error(
                 &plugin_id,
                 &path,
@@ -273,6 +273,62 @@ impl PluginConfigSchema {
             ))
         })
     }
+}
+
+fn read_schema_file(plugin_id: &str, path: &Path) -> Result<Vec<u8>, CliError> {
+    let path_metadata = fs::metadata(path).map_err(|error| {
+        schema_error(plugin_id, path, format!("failed to read schema: {error}"))
+    })?;
+    validate_schema_file_metadata(plugin_id, path, &path_metadata)?;
+
+    let file = fs::File::open(path).map_err(|error| {
+        schema_error(plugin_id, path, format!("failed to read schema: {error}"))
+    })?;
+    let file_metadata = file.metadata().map_err(|error| {
+        schema_error(
+            plugin_id,
+            path,
+            format!("failed to inspect open schema: {error}"),
+        )
+    })?;
+    validate_schema_file_metadata(plugin_id, path, &file_metadata)?;
+
+    let mut contents = Vec::with_capacity(file_metadata.len() as usize);
+    file.take(MAX_CONFIG_SCHEMA_BYTES + 1)
+        .read_to_end(&mut contents)
+        .map_err(|error| {
+            schema_error(plugin_id, path, format!("failed to read schema: {error}"))
+        })?;
+    if contents.len() as u64 > MAX_CONFIG_SCHEMA_BYTES {
+        return Err(schema_error(
+            plugin_id,
+            path,
+            "schema exceeds the 1 MiB size limit",
+        ));
+    }
+    Ok(contents)
+}
+
+fn validate_schema_file_metadata(
+    plugin_id: &str,
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), CliError> {
+    if !metadata.is_file() {
+        return Err(schema_error(
+            plugin_id,
+            path,
+            "schema path must identify a regular file",
+        ));
+    }
+    if metadata.len() > MAX_CONFIG_SCHEMA_BYTES {
+        return Err(schema_error(
+            plugin_id,
+            path,
+            "schema exceeds the 1 MiB size limit",
+        ));
+    }
+    Ok(())
 }
 
 fn schema_error(plugin_id: &str, path: &Path, message: impl std::fmt::Display) -> CliError {
@@ -1680,5 +1736,32 @@ mod tests {
         fs::write(&invalid, "{").expect("write invalid json");
         let error = PluginConfigSchema::load("acme.invalid", &invalid).expect_err("invalid json");
         assert!(error.to_string().contains("not valid JSON"));
+    }
+
+    #[test]
+    fn schema_reads_require_regular_files_within_the_size_limit() {
+        let directory = tempdir().expect("create temp directory");
+        let error = PluginConfigSchema::load("acme.directory", directory.path())
+            .expect_err("reject directory schema path");
+        assert!(error.to_string().contains("regular file"));
+
+        let oversized = directory.path().join("oversized.schema.json");
+        fs::File::create(&oversized)
+            .expect("create oversized schema")
+            .set_len(MAX_CONFIG_SCHEMA_BYTES + 1)
+            .expect("size oversized schema");
+        let error = PluginConfigSchema::load("acme.oversized", &oversized)
+            .expect_err("reject oversized schema");
+        assert!(error.to_string().contains("1 MiB size limit"));
+
+        let maximum = directory.path().join("maximum.schema.json");
+        let mut source = serde_json::to_vec(&json!({
+            "$schema": DRAFT2020,
+            "type": "object"
+        }))
+        .expect("serialize schema");
+        source.resize(MAX_CONFIG_SCHEMA_BYTES as usize, b' ');
+        fs::write(&maximum, source).expect("write maximum-sized schema");
+        PluginConfigSchema::load("acme.maximum", maximum).expect("accept schema at the size limit");
     }
 }
