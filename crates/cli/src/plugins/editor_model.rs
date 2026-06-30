@@ -139,6 +139,31 @@ impl EditableComponent {
         Ok(())
     }
 
+    pub(super) fn clear_field(&mut self, field: EditorFieldSpec) -> Result<bool, CliError> {
+        if !field.optional {
+            return Ok(false);
+        }
+        match self {
+            Self::Observability(state) => {
+                remove_struct_field(&mut state.config, field.name)?;
+                state.mark_config_touched();
+            }
+            Self::Adaptive(state) => {
+                remove_struct_field(&mut state.config, field.name)?;
+                state.mark_config_touched();
+            }
+            Self::NemoGuardrails(state) => {
+                remove_struct_field(&mut state.config, field.name)?;
+                state.mark_config_touched();
+            }
+            Self::PiiRedaction(state) => {
+                remove_struct_field(&mut state.config, field.name)?;
+                state.mark_config_touched();
+            }
+        }
+        Ok(true)
+    }
+
     pub(super) fn store(&self, config: &mut PluginConfig) -> Result<(), CliError> {
         match self {
             Self::Observability(state) => store_observability_state(config, state),

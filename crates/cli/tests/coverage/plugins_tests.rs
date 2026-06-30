@@ -477,6 +477,64 @@ fn component_enablement_shortcuts_clear_and_reset_differ() {
 }
 
 #[test]
+fn component_field_clear_only_removes_optional_fields() {
+    let config = PluginConfig::default();
+    let mut components = editable_components(&config).unwrap();
+
+    let observability = components
+        .iter_mut()
+        .find(|component| component.label() == "Observability")
+        .unwrap();
+    let atof_index = observability
+        .fields()
+        .iter()
+        .position(|field| field.name == "atof")
+        .unwrap();
+    let atof = observability.fields()[atof_index];
+    assert!(atof.optional);
+    let EditableComponent::Observability(state) = observability else {
+        unreachable!();
+    };
+    state.config.atof = Some(Default::default());
+    assert!(observability.field_configured(atof));
+    clear_component_menu_item(
+        observability,
+        Some(ComponentMenuAction::EditField(atof_index)),
+    )
+    .unwrap();
+    assert!(!observability.field_configured(atof));
+
+    let pii_redaction = components
+        .iter_mut()
+        .find(|component| component.label() == "PII Redaction")
+        .unwrap();
+    let input_index = pii_redaction
+        .fields()
+        .iter()
+        .position(|field| field.name == "input")
+        .unwrap();
+    let input = pii_redaction.fields()[input_index];
+    assert!(!input.optional);
+    let EditableComponent::PiiRedaction(state) = pii_redaction else {
+        unreachable!();
+    };
+    state.config.input = false;
+    assert!(pii_redaction.field_configured(input));
+    clear_component_menu_item(
+        pii_redaction,
+        Some(ComponentMenuAction::EditField(input_index)),
+    )
+    .unwrap();
+    assert!(pii_redaction.field_configured(input));
+    reset_component_menu_item(
+        pii_redaction,
+        Some(ComponentMenuAction::EditField(input_index)),
+    )
+    .unwrap();
+    assert!(!pii_redaction.field_configured(input));
+}
+
+#[test]
 fn menu_viewport_keeps_selection_visible_and_pages() {
     let first = menu_viewport(20, 0, 8);
     assert_eq!((first.start, first.end, first.page_size), (0, 4, 4));

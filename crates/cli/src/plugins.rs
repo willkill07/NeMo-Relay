@@ -307,8 +307,13 @@ fn clear_component_menu_item(
     match action {
         Some(ComponentMenuAction::Toggle) => component.set_enabled(false),
         Some(ComponentMenuAction::EditField(field_index)) => {
-            if let Some(field) = component.fields().get(field_index) {
-                component.reset_field(*field)?;
+            if let Some(field) = component.fields().get(field_index)
+                && !component.clear_field(*field)?
+            {
+                println!(
+                    "  {} is required; use reset to restore its default.",
+                    field.label
+                );
             }
         }
         Some(ComponentMenuAction::Back) | None => {
