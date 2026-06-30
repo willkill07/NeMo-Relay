@@ -784,6 +784,7 @@ enum SecretSegment {
     Any,
     Pattern(SecretPropertyPattern),
     Index(usize),
+    Tail(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -828,6 +829,7 @@ impl SecretPattern {
                     pointer.push_str(&format!("~pattern({})", pattern.source))
                 }
                 SecretSegment::Index(index) => pointer.push_str(&index.to_string()),
+                SecretSegment::Tail(start) => pointer.push_str(&format!("~tail({start})")),
             }
         }
         pointer
@@ -871,6 +873,13 @@ impl SecretPattern {
             SecretSegment::Index(index) => {
                 if let Some(child) = value.get_mut(*index) {
                     self.redact(child, offset + 1);
+                }
+            }
+            SecretSegment::Tail(start) => {
+                if let Value::Array(values) = value {
+                    for child in values.iter_mut().skip(*start) {
+                        self.redact(child, offset + 1);
+                    }
                 }
             }
         }
@@ -938,6 +947,13 @@ impl SecretPattern {
                     self.redact_for_edit(child, offset + 1, secrets, occupied, next_token);
                 }
             }
+            SecretSegment::Tail(start) => {
+                if let Value::Array(values) = value {
+                    for child in values.iter_mut().skip(*start) {
+                        self.redact_for_edit(child, offset + 1, secrets, occupied, next_token);
+                    }
+                }
+            }
         }
     }
 
@@ -952,6 +968,9 @@ impl SecretPattern {
                     SecretSegment::Any => true,
                     SecretSegment::Pattern(pattern) => pattern_matches(pattern, property),
                     SecretSegment::Index(index) => property.parse::<usize>() == Ok(*index),
+                    SecretSegment::Tail(start) => {
+                        property.parse::<usize>().is_ok_and(|index| index >= *start)
+                    }
                 })
     }
 
@@ -972,6 +991,9 @@ impl SecretPattern {
                     }
                     (SecretSegment::Index(expected), SecretInstanceSegment::Index(actual)) => {
                         expected == actual
+                    }
+                    (SecretSegment::Tail(start), SecretInstanceSegment::Index(actual)) => {
+                        actual >= start
                     }
                     _ => false,
                 })
@@ -1111,12 +1133,25 @@ fn discover_secret_patterns(
             discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
         }
     }
-    if let Some(items) = object.get("items")
-        && items.is_object()
-    {
-        let mut child_path = instance_path.to_vec();
-        child_path.push(SecretSegment::Any);
-        discover_secret_patterns(root, items, &child_path, &references, output)?;
+    if let Some(items) = object.get("items") {
+        if items.is_object() {
+            let mut child_path = instance_path.to_vec();
+            child_path.push(SecretSegment::Any);
+            discover_secret_patterns(root, items, &child_path, &references, output)?;
+        } else if let Some(tuple_items) = items.as_array() {
+            for (index, child_schema) in tuple_items.iter().enumerate() {
+                let mut child_path = instance_path.to_vec();
+                child_path.push(SecretSegment::Index(index));
+                discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
+            }
+            if let Some(additional_items) = object.get("additionalItems")
+                && additional_items.is_object()
+            {
+                let mut child_path = instance_path.to_vec();
+                child_path.push(SecretSegment::Tail(tuple_items.len()));
+                discover_secret_patterns(root, additional_items, &child_path, &references, output)?;
+            }
+        }
     }
     if let Some(prefix_items) = object.get("prefixItems").and_then(Value::as_array) {
         for (index, child_schema) in prefix_items.iter().enumerate() {
@@ -1560,6 +1595,56 @@ mod tests {
         assert!(loaded.has_secrets_at(&["patterned".to_owned()]));
         assert!(loaded.has_secrets_at(&["tuple".to_owned()]));
         assert!(loaded.has_secrets_at(&["contained".to_owned()]));
+    }
+
+    #[test]
+    fn secret_discovery_handles_draft7_tuple_and_additional_items() {
+        let loaded = load(&json!({
+            "$schema": DRAFT7,
+            "type": "object",
+            "properties": {
+                "tuple": {
+                    "type": "array",
+                    "items": [
+                        {"type": "string"},
+                        {"type": "string", "writeOnly": true}
+                    ],
+                    "additionalItems": {
+                        "type": "object",
+                        "properties": {
+                            "token": {"type": "string", "writeOnly": true}
+                        }
+                    }
+                }
+            }
+        }));
+        let config = json!({
+            "tuple": [
+                "visible",
+                "tuple-secret",
+                {"token": "tail-secret-one", "visible": "keep"},
+                {"token": "tail-secret-two"}
+            ]
+        });
+
+        assert_eq!(
+            loaded.redact(&config),
+            json!({
+                "tuple": [
+                    "visible",
+                    REDACTED,
+                    {"token": REDACTED, "visible": "keep"},
+                    {"token": REDACTED}
+                ]
+            })
+        );
+        let (redacted, secrets) = loaded.redact_for_edit(&config);
+        assert_eq!(
+            loaded
+                .restore_edit_secrets(&redacted, &secrets)
+                .expect("restore tuple secrets"),
+            config
+        );
     }
 
     #[test]
