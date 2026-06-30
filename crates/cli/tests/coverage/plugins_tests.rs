@@ -1466,6 +1466,63 @@ value = "preserve-host-section"
 }
 
 #[test]
+fn dynamic_config_array_resize_preserves_toml_native_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("plugins.toml");
+    std::fs::write(
+        &path,
+        r#"[[plugins.dynamic]]
+manifest = "./plugin/relay-plugin.toml"
+config = { records = [{ observed_at = 1979-05-27T07:32:00Z, label = "existing" }] }
+"#,
+    )
+    .unwrap();
+
+    let mut document = PluginConfigDocument::read(&path).unwrap();
+    let original = document.dynamic_entries().unwrap()[0]
+        .config
+        .clone()
+        .unwrap();
+    let mut grown = original.clone();
+    grown
+        .get_mut("records")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"label": "new"}));
+    document
+        .patch_dynamic_config(0, Some(&original), Some(grown.clone()))
+        .unwrap();
+
+    let grown_root = document.render().unwrap().parse::<toml::Table>().unwrap();
+    let grown_records =
+        grown_root["plugins"]["dynamic"].as_array().unwrap()[0]["config"]["records"]
+            .as_array()
+            .unwrap();
+    assert_eq!(grown_records.len(), 2);
+    assert!(grown_records[0]["observed_at"].is_datetime());
+
+    let mut shrunk = grown.clone();
+    shrunk
+        .get_mut("records")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .truncate(1);
+    document
+        .patch_dynamic_config(0, Some(&grown), Some(shrunk))
+        .unwrap();
+
+    let shrunk_root = document.render().unwrap().parse::<toml::Table>().unwrap();
+    let shrunk_records =
+        shrunk_root["plugins"]["dynamic"].as_array().unwrap()[0]["config"]["records"]
+            .as_array()
+            .unwrap();
+    assert_eq!(shrunk_records.len(), 1);
+    assert!(shrunk_records[0]["observed_at"].is_datetime());
+}
+
+#[test]
 fn dynamic_editor_loads_document_local_plugins_and_redacts_schema_secrets() {
     let temp = tempfile::tempdir().unwrap();
     write_editor_dynamic_manifest(

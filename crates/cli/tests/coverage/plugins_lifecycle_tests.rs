@@ -406,11 +406,15 @@ fn materialize_native_example_manifest(dir: &Path) -> (PathBuf, PathBuf) {
         repository_root.join("examples/rust-native-plugin/relay-plugin.toml"),
     )
     .unwrap();
+    let config_schema =
+        std::fs::read(repository_root.join("examples/rust-native-plugin/config.schema.json"))
+            .unwrap();
     let manifest = template
         .replace("<platform-library-file>", &artifact_name)
         .replace("<artifact-sha256>", &digest);
     let manifest_path = dir.join("relay-plugin.toml");
     std::fs::write(&manifest_path, manifest).unwrap();
+    std::fs::write(dir.join("config.schema.json"), config_schema).unwrap();
     (manifest_path, artifact_path)
 }
 

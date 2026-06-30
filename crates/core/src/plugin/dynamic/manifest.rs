@@ -359,7 +359,7 @@ impl DynamicPluginManifest {
             return Ok(None);
         };
 
-        let schema_path = Path::new(config_schema.path.trim());
+        let schema_path = Path::new(validate_config_schema_path(config_schema)?);
         if schema_path.is_absolute() {
             return Ok(Some(schema_path.to_path_buf()));
         }
@@ -518,18 +518,25 @@ fn validate_config_schema_contract(
         }
         (false, None) => return Ok(()),
         (true, Some(config_schema)) => {
-            let path = required_trimmed_string(Some(&config_schema.path), "config_schema.path")?;
-            if has_uri_scheme(path.trim()) || is_unc_path(path.trim()) {
-                return Err(PluginError::InvalidConfig(
-                    "config_schema.path must be a local filesystem path, not a URI".into(),
-                ));
-            }
+            validate_config_schema_path(config_schema)?;
         }
     }
     Ok(())
 }
 
+fn validate_config_schema_path(config_schema: &DynamicPluginManifestConfigSchema) -> Result<&str> {
+    let path = required_trimmed_string(Some(&config_schema.path), "config_schema.path")?;
+    if has_uri_scheme(path) || is_unc_path(path) {
+        return Err(PluginError::InvalidConfig(
+            "config_schema.path must be a local filesystem path, not a URI or network share".into(),
+        ));
+    }
+    Ok(path)
+}
+
 fn is_unc_path(value: &str) -> bool {
+    // A leading `//` can identify a local path on POSIX, but manifests are portable and the same
+    // spelling is a UNC network share on Windows, so reject it consistently on every platform.
     value.starts_with(r"\\") || value.starts_with("//")
 }
 

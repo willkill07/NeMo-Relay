@@ -3,6 +3,7 @@
 
 //! Static JSON Schema loading and editor metadata for dynamic plugins.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -153,7 +154,14 @@ impl PluginConfigSchema {
         };
 
         let mut secret_patterns = Vec::new();
-        discover_secret_patterns(&source, &source, &[], &HashSet::new(), &mut secret_patterns);
+        discover_secret_patterns(&source, &source, &[], &HashSet::new(), &mut secret_patterns)
+            .map_err(|error| {
+                schema_error(
+                    &plugin_id,
+                    &path,
+                    format!("secret schema patterns are invalid: {error}"),
+                )
+            })?;
         secret_patterns.sort();
         secret_patterns.dedup();
         #[cfg(test)]
@@ -774,8 +782,34 @@ fn find_anchor<'a>(schema: &'a Value, anchor: &str) -> Option<&'a Value> {
 enum SecretSegment {
     Property(String),
     Any,
-    Pattern(String),
+    Pattern(SecretPropertyPattern),
     Index(usize),
+}
+
+#[derive(Debug, Clone)]
+struct SecretPropertyPattern {
+    source: String,
+    matcher: regex::Regex,
+}
+
+impl PartialEq for SecretPropertyPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+
+impl Eq for SecretPropertyPattern {}
+
+impl PartialOrd for SecretPropertyPattern {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SecretPropertyPattern {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.source.cmp(&other.source)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -791,7 +825,7 @@ impl SecretPattern {
                 SecretSegment::Property(property) => pointer.push_str(&escape_pointer(property)),
                 SecretSegment::Any => pointer.push('*'),
                 SecretSegment::Pattern(pattern) => {
-                    pointer.push_str(&format!("~pattern({pattern})"))
+                    pointer.push_str(&format!("~pattern({})", pattern.source))
                 }
                 SecretSegment::Index(index) => pointer.push_str(&index.to_string()),
             }
@@ -950,10 +984,8 @@ enum SecretInstanceSegment {
     Index(usize),
 }
 
-fn pattern_matches(pattern: &str, property: &str) -> bool {
-    regex::Regex::new(pattern)
-        .map(|pattern| pattern.is_match(property))
-        .unwrap_or(true)
+fn pattern_matches(pattern: &SecretPropertyPattern, property: &str) -> bool {
+    pattern.matcher.is_match(property)
 }
 
 fn collect_string_values(value: &Value, output: &mut HashSet<String>) {
@@ -1038,25 +1070,25 @@ fn discover_secret_patterns(
     instance_path: &[SecretSegment],
     reference_stack: &HashSet<String>,
     output: &mut Vec<SecretPattern>,
-) {
+) -> Result<(), String> {
     let mut references = reference_stack.clone();
     let resolved = match resolve_schema(root, schema, &mut references) {
         Ok(resolved) => resolved,
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
     if schema_type(resolved) == Some("string") && annotation_bool(schema, resolved, "writeOnly") {
         output.push(SecretPattern(instance_path.to_vec()));
-        return;
+        return Ok(());
     }
     let Some(object) = resolved.as_object() else {
-        return;
+        return Ok(());
     };
 
     if let Some(properties) = object.get("properties").and_then(Value::as_object) {
         for (property, child_schema) in properties {
             let mut child_path = instance_path.to_vec();
             child_path.push(SecretSegment::Property(property.clone()));
-            discover_secret_patterns(root, child_schema, &child_path, &references, output);
+            discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
         }
     }
     if let Some(additional) = object.get("additionalProperties")
@@ -1064,13 +1096,19 @@ fn discover_secret_patterns(
     {
         let mut child_path = instance_path.to_vec();
         child_path.push(SecretSegment::Any);
-        discover_secret_patterns(root, additional, &child_path, &references, output);
+        discover_secret_patterns(root, additional, &child_path, &references, output)?;
     }
     if let Some(patterns) = object.get("patternProperties").and_then(Value::as_object) {
         for (pattern, child_schema) in patterns {
             let mut child_path = instance_path.to_vec();
-            child_path.push(SecretSegment::Pattern(pattern.clone()));
-            discover_secret_patterns(root, child_schema, &child_path, &references, output);
+            let matcher = regex::Regex::new(pattern).map_err(|error| {
+                format!("unsupported patternProperties expression {pattern:?}: {error}")
+            })?;
+            child_path.push(SecretSegment::Pattern(SecretPropertyPattern {
+                source: pattern.clone(),
+                matcher,
+            }));
+            discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
         }
     }
     if let Some(items) = object.get("items")
@@ -1078,19 +1116,19 @@ fn discover_secret_patterns(
     {
         let mut child_path = instance_path.to_vec();
         child_path.push(SecretSegment::Any);
-        discover_secret_patterns(root, items, &child_path, &references, output);
+        discover_secret_patterns(root, items, &child_path, &references, output)?;
     }
     if let Some(prefix_items) = object.get("prefixItems").and_then(Value::as_array) {
         for (index, child_schema) in prefix_items.iter().enumerate() {
             let mut child_path = instance_path.to_vec();
             child_path.push(SecretSegment::Index(index));
-            discover_secret_patterns(root, child_schema, &child_path, &references, output);
+            discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
         }
     }
     for keyword in ["allOf", "anyOf", "oneOf"] {
         if let Some(branches) = object.get(keyword).and_then(Value::as_array) {
             for branch in branches {
-                discover_secret_patterns(root, branch, instance_path, &references, output);
+                discover_secret_patterns(root, branch, instance_path, &references, output)?;
             }
         }
     }
@@ -1098,7 +1136,7 @@ fn discover_secret_patterns(
         if let Some(branch) = object.get(keyword)
             && branch.is_object()
         {
-            discover_secret_patterns(root, branch, instance_path, &references, output);
+            discover_secret_patterns(root, branch, instance_path, &references, output)?;
         }
     }
     if let Some(contains) = object.get("contains")
@@ -1106,8 +1144,9 @@ fn discover_secret_patterns(
     {
         let mut child_path = instance_path.to_vec();
         child_path.push(SecretSegment::Any);
-        discover_secret_patterns(root, contains, &child_path, &references, output);
+        discover_secret_patterns(root, contains, &child_path, &references, output)?;
     }
+    Ok(())
 }
 
 fn push_pointer(pointer: &str, segment: &str) -> String {
@@ -1521,6 +1560,23 @@ mod tests {
         assert!(loaded.has_secrets_at(&["patterned".to_owned()]));
         assert!(loaded.has_secrets_at(&["tuple".to_owned()]));
         assert!(loaded.has_secrets_at(&["contained".to_owned()]));
+    }
+
+    #[test]
+    fn rejects_pattern_properties_unsupported_by_secret_matcher() {
+        let (_directory, path) = write_schema(&json!({
+            "$schema": DRAFT2020,
+            "type": "object",
+            "patternProperties": {
+                "(?=secret)": {"type": "string", "writeOnly": true}
+            }
+        }));
+
+        let error = PluginConfigSchema::load("acme.bad-pattern", path)
+            .expect_err("reject unsupported patternProperties expression");
+        let message = error.to_string();
+        assert!(message.contains("patternProperties"), "{message}");
+        assert!(message.contains("look-around"), "{message}");
     }
 
     #[test]

@@ -227,10 +227,15 @@ fn patch_json_value(
             Ok(())
         }
         (toml::Value::Array(raw), Value::Array(original), Value::Array(updated))
-            if raw.len() == original.len() && original.len() == updated.len() =>
+            if raw.len() == original.len() =>
         {
-            for ((raw, original), updated) in raw.iter_mut().zip(original).zip(updated) {
-                patch_json_value(raw, original, updated)?;
+            let shared_len = original.len().min(updated.len());
+            for index in 0..shared_len {
+                patch_json_value(&mut raw[index], &original[index], &updated[index])?;
+            }
+            raw.truncate(updated.len());
+            for value in &updated[shared_len..] {
+                raw.push(json_to_toml(value.clone())?);
             }
             Ok(())
         }

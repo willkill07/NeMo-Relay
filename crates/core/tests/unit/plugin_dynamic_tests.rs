@@ -813,6 +813,29 @@ fn manifest_resolves_relative_config_schema_path_from_manifest_parent() {
 }
 
 #[test]
+fn manifest_resolver_rejects_mutated_non_local_config_schema_paths() {
+    let mut manifest =
+        DynamicPluginManifest::parse_toml(valid_worker_manifest_toml()).expect("parse manifest");
+
+    for path in [
+        "https://example.com/config.schema.json",
+        r"\\server\share\config.schema.json",
+        "//server/share/config.schema.json",
+    ] {
+        manifest.config_schema.as_mut().unwrap().path = path.to_owned();
+        let error = manifest
+            .resolve_config_schema_path("/plugins/native/relay-plugin.toml")
+            .expect_err("public resolver must reject non-local paths");
+        match error {
+            PluginError::InvalidConfig(message) => {
+                assert!(message.contains("local filesystem path"), "{message}");
+            }
+            other => panic!("unexpected config schema path error: {other}"),
+        }
+    }
+}
+
+#[test]
 fn manifest_resolves_absolute_config_schema_path_without_filesystem_access() {
     let dir = temp_dir("dynamic-plugin-config-schema-absolute");
     let manifest_path = dir.join(DYNAMIC_PLUGIN_MANIFEST_FILENAME);
