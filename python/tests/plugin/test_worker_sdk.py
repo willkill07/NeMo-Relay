@@ -14,6 +14,7 @@ import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
+from unittest import mock
 
 import pytest
 
@@ -1696,26 +1697,20 @@ async def test_unlink_unix_socket_still_refuses_active_socket_when_close_wait_ti
 ):
     with tempfile.TemporaryDirectory(prefix="nr-plugin-", dir="/tmp") as directory:
         socket_path = Path(directory) / "active.sock"
-        server = await asyncio.start_unix_server(lambda _reader, writer: writer.close(), path=socket_path)
+        writer = mock.AsyncMock(spec=asyncio.StreamWriter)
+        writer.wait_closed.side_effect = TimeoutError
 
-        class TimeoutWriter:
-            def close(self) -> None:
-                pass
-
-            async def wait_closed(self) -> None:
-                raise TimeoutError
-
-        async def open_unix_connection(_path: Path):
-            return object(), TimeoutWriter()
+        async def open_unix_connection(_path: Path) -> tuple[object, mock.AsyncMock]:
+            return object(), writer
 
         monkeypatch.setattr(plugin_api.asyncio, "open_unix_connection", open_unix_connection)
         try:
-            with pytest.raises(WorkerSdkError, match="already active"):
-                await _unlink_unix_socket(f"unix://{socket_path}")
-            assert socket_path.exists()
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unix_socket:
+                unix_socket.bind(str(socket_path))
+                with pytest.raises(WorkerSdkError, match="already active"):
+                    await _unlink_unix_socket(f"unix://{socket_path}")
+                assert socket_path.exists()
         finally:
-            server.close()
-            await server.wait_closed()
             socket_path.unlink(missing_ok=True)
 
 

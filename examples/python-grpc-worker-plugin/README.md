@@ -21,8 +21,8 @@ nemo-relay --config "$relay_config" plugins enable examples.python_grpc_worker
 nemo-relay --config "$relay_config" --bind 127.0.0.1:4040
 ```
 
-After stopping Relay, remove the plugin and its managed environment, then delete
-the temporary state:
+Press Ctrl+C to stop Relay. Then remove the plugin and its managed environment,
+and delete the temporary state:
 
 ```bash
 nemo-relay --config "$relay_config" plugins remove examples.python_grpc_worker
