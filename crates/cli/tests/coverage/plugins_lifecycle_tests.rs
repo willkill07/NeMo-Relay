@@ -642,8 +642,31 @@ fn add_provisions_persists_and_removes_managed_python_environment() {
         OsString::from(if cfg!(windows) { "python" } else { "python3" })
     );
     assert_eq!(
+        calls[0].1,
+        vec![
+            OsString::from("-m"),
+            OsString::from("venv"),
+            environment_path.as_os_str().to_owned(),
+        ]
+    );
+    assert_eq!(
         PathBuf::from(&calls[1].0),
         environment::environment_python_path(&environment_path)
+    );
+    assert_eq!(
+        calls[1].1,
+        vec![
+            OsString::from("-m"),
+            OsString::from("pip"),
+            OsString::from("install"),
+            plugin_dir.canonicalize().unwrap().into_os_string(),
+        ]
+    );
+    assert!(
+        !calls[1]
+            .1
+            .iter()
+            .any(|arg| arg == "-e" || arg == "--editable")
     );
     enable(
         PluginsEnableCommand {
@@ -782,6 +805,75 @@ fn enable_rejects_missing_managed_python_environment() {
     assert!(message.contains("is unavailable"));
     let scopes = load_scoped_registries(None).unwrap();
     let record = find_record_by_id(&scopes, "acme.python-missing")
+        .unwrap()
+        .unwrap()
+        .record;
+    assert!(!record.spec.enabled);
+    assert_eq!(
+        record.status.validation.environment,
+        DynamicPluginCheckState::Invalid
+    );
+}
+
+#[test]
+fn enable_rejects_python_environment_outside_managed_location() {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = EnvScope::hermetic(&temp);
+    let _cwd = CurrentDirGuard::enter(temp.path());
+    let plugin_dir = temp.path().join("plugins").join("python");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    write_python_dynamic_manifest(&plugin_dir, "acme.python-outside");
+    let runner = FakePythonEnvironmentRunner::default();
+    let server = ServerArgs::default();
+    add_with_environment_runner(
+        PluginsAddCommand {
+            scope: PluginsScopeArgs {
+                project: true,
+                ..PluginsScopeArgs::default()
+            },
+            path: plugin_dir,
+        },
+        &server,
+        &runner,
+    )
+    .unwrap();
+
+    let outside = temp.path().join("outside");
+    let outside_python = environment::environment_python_path(&outside);
+    std::fs::create_dir_all(outside_python.parent().unwrap()).unwrap();
+    std::fs::write(&outside_python, b"not managed by Relay").unwrap();
+    let mut scopes = load_scoped_registries(None).unwrap();
+    let scope = scopes
+        .iter_mut()
+        .find(|scope| scope.registry.get("acme.python-outside").is_some())
+        .unwrap();
+    scope
+        .registry
+        .update_environment(
+            "acme.python-outside",
+            Some(outside.display().to_string()),
+            DynamicPluginCheckState::Valid,
+        )
+        .unwrap();
+    scope.save().unwrap();
+
+    let error = enable(
+        PluginsEnableCommand {
+            id: "acme.python-outside".into(),
+        },
+        &server,
+    )
+    .expect_err("an unmanaged Python environment should prevent activation");
+
+    let (_, _, kind, code, message) = error
+        .as_plugin_lifecycle_error_context()
+        .expect("environment refusal should be structured");
+    assert_eq!(kind, PluginLifecycleFailureKind::Refused);
+    assert_eq!(code, Some("environment_failed"));
+    assert!(message.contains("is unavailable"));
+    assert!(outside.exists());
+    let scopes = load_scoped_registries(None).unwrap();
+    let record = find_record_by_id(&scopes, "acme.python-outside")
         .unwrap()
         .unwrap()
         .record;

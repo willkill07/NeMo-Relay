@@ -131,6 +131,7 @@ fn add_with_environment_runner(
         manifest,
         manifest_ref.clone(),
         environment_ref_string,
+        &scopes[scope_index].state_path,
         &policy,
         &trust,
     ) {
@@ -632,15 +633,18 @@ fn load_and_hydrate_scopes_with_updates(
                 &trust,
             )?;
         } else {
+            let state_path = scopes[scope_index].state_path.clone();
+            let record = validated_record_from_manifest(
+                manifest,
+                manifest_ref,
+                None,
+                &state_path,
+                &policy,
+                &trust,
+            )?;
             scopes[scope_index]
                 .registry
-                .add(validated_record_from_manifest(
-                    manifest,
-                    manifest_ref,
-                    None,
-                    &policy,
-                    &trust,
-                )?)
+                .add(record)
                 .map_err(|error| CliError::Config(error.to_string()))?;
         }
     }
@@ -651,10 +655,11 @@ fn validated_record_from_manifest(
     manifest: DynamicPluginManifest,
     manifest_ref: String,
     environment_ref: Option<String>,
+    state_path: &Path,
     policy: &EvaluatedDynamicPluginHostPolicy,
     trust: &EvaluatedDynamicPluginTrust,
 ) -> Result<DynamicPluginRecord, CliError> {
-    let environment = environment_state(&manifest, environment_ref.as_deref());
+    let environment = environment_state(&manifest, state_path, environment_ref.as_deref());
     let mut record = manifest
         .into_record(Some(manifest_ref))
         .map_err(|error| CliError::Config(error.to_string()))?;
@@ -721,7 +726,7 @@ fn update_registry_validation_status(
         .registry
         .get(plugin_id)
         .and_then(|record| record.source.environment_ref.as_deref());
-    let environment = environment_state(manifest, environment_ref);
+    let environment = environment_state(manifest, &scope.state_path, environment_ref);
     let environment_error = environment_last_error(plugin_id, environment, environment_ref);
     scope
         .registry

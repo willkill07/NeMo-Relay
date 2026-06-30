@@ -27,6 +27,7 @@ use nemo_relay::plugin::{
     PluginComponentSpec, PluginConfig, clear_plugin_configuration, initialize_plugins_exact,
 };
 use serde_json::{Map, Value as Json, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -781,8 +782,14 @@ fn python_worker_without_managed_environment_is_rejected() {
 #[test]
 fn python_worker_uses_configured_environment() {
     let _guard = WORKER_PLUGIN_TEST_LOCK.blocking_lock();
-    let missing_environment =
-        std::env::temp_dir().join(format!("missing-python-environment-{}", Uuid::now_v7()));
+    let environment_name = Sha256::digest(b"fixture_worker")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let missing_environment = std::env::temp_dir()
+        .join(format!("missing-python-environment-{}", Uuid::now_v7()))
+        .join(".dynamic-plugin-environments")
+        .join(environment_name);
     let relay = supported_relay_requirement();
     let (_manifest_dir, manifest_ref) = write_worker_manifest(
         "fixture_worker",
@@ -834,6 +841,7 @@ async fn python_worker_host_runtime_mark_and_mutated_request_round_trip() {
         config: config.clone(),
     }])
     .expect("managed Python worker should load");
+    let mut cleanup = PythonWorkerCleanup::new(activation);
 
     let mut plugin_config = PluginConfig::default();
     plugin_config.components.push(PluginComponentSpec {
@@ -853,6 +861,7 @@ async fn python_worker_host_runtime_mark_and_mutated_request_round_trip() {
         Arc::new(move |event| captured.lock().unwrap().push(event.clone())),
     )
     .expect("test subscriber should register");
+    cleanup.subscriber_name = Some(subscriber_name);
 
     let rewritten = tool_request_intercepts("lookup", json!({ "query": "relay" }))
         .expect("Python callback should emit a mark and return its mutation");
@@ -867,9 +876,7 @@ async fn python_worker_host_runtime_mark_and_mutated_request_round_trip() {
         None,
     );
 
-    deregister_subscriber(subscriber_name).expect("test subscriber should deregister");
-    clear_plugin_configuration().expect("Python worker config should clear");
-    activation.clear();
+    drop(cleanup);
 }
 
 struct FixtureCodec;
@@ -914,6 +921,32 @@ impl LlmCodec for FixtureCodec {
 struct LoadedWorker {
     activation: Option<WorkerPluginActivation>,
     _manifest_dir: TempDir,
+}
+
+struct PythonWorkerCleanup {
+    activation: Option<WorkerPluginActivation>,
+    subscriber_name: Option<&'static str>,
+}
+
+impl PythonWorkerCleanup {
+    fn new(activation: WorkerPluginActivation) -> Self {
+        Self {
+            activation: Some(activation),
+            subscriber_name: None,
+        }
+    }
+}
+
+impl Drop for PythonWorkerCleanup {
+    fn drop(&mut self) {
+        if let Some(subscriber_name) = self.subscriber_name.take() {
+            let _ = deregister_subscriber(subscriber_name);
+        }
+        let _ = clear_plugin_configuration();
+        if let Some(activation) = self.activation.take() {
+            activation.clear();
+        }
+    }
 }
 
 impl LoadedWorker {

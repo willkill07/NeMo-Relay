@@ -13,6 +13,8 @@ with `nemo-relay plugins add`; Relay creates a per-plugin virtual environment,
 installs `source.manifest_root`, and records that environment for activation.
 Python workers without a lifecycle-managed environment are rejected.
 
+A minimal worker plugin looks like this:
+
 ```python
 from nemo_relay_plugin import Json, PluginContext, WorkerPlugin, serve_plugin
 

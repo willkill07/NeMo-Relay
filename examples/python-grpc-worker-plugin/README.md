@@ -33,5 +33,4 @@ environment.
 
 The SDK package owns the generated protobuf stubs and gRPC server setup. Relay
 starts the worker through the manifest entrypoint and supplies the worker
-socket, host socket, activation ID, plugin ID, and activation token environment
-variables.
+socket, host socket, activation ID, and activation token environment variables.

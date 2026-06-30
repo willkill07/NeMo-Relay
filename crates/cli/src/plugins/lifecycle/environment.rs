@@ -169,17 +169,30 @@ pub(super) fn remove_managed_environment(
 
 pub(super) fn environment_state(
     manifest: &DynamicPluginManifest,
+    state_path: &Path,
     environment_ref: Option<&str>,
 ) -> DynamicPluginCheckState {
     if !is_python_worker(manifest) {
         return DynamicPluginCheckState::Unknown;
     }
-    match environment_ref {
-        Some(environment_ref) if environment_python_path(Path::new(environment_ref)).is_file() => {
-            DynamicPluginCheckState::Valid
-        }
-        Some(_) | None => DynamicPluginCheckState::Invalid,
+    let Some(environment_ref) = environment_ref else {
+        return DynamicPluginCheckState::Invalid;
+    };
+    let Ok(expected) = managed_environment_path(state_path, &manifest.plugin.id) else {
+        return DynamicPluginCheckState::Invalid;
+    };
+    let Ok(configured) = absolute_path(Path::new(environment_ref)) else {
+        return DynamicPluginCheckState::Invalid;
+    };
+    if configured != expected
+        || std::fs::symlink_metadata(&configured)
+            .map(|metadata| !metadata.file_type().is_dir())
+            .unwrap_or(true)
+        || !environment_python_path(&configured).is_file()
+    {
+        return DynamicPluginCheckState::Invalid;
     }
+    DynamicPluginCheckState::Valid
 }
 
 pub(super) fn environment_python_path(environment: &Path) -> PathBuf {
