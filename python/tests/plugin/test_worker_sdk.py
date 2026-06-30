@@ -1509,6 +1509,7 @@ async def test_lifecycle_acks(service: _WorkerService):
 async def test_cancel_invocation_stops_active_async_callback_and_is_idempotent():
     started = asyncio.Event()
     cancelled = asyncio.Event()
+    release = asyncio.Event()
 
     class CancelPlugin(WorkerPlugin):
         plugin_id = "tests.cancel"
@@ -1523,6 +1524,7 @@ async def test_cancel_invocation_stops_active_async_callback_and_is_idempotent()
                     await asyncio.Event().wait()
                 except asyncio.CancelledError:
                     cancelled.set()
+                    await release.wait()
                     raise
 
             ctx.register_tool_execution_intercept("cancel", tool_execution)
@@ -1547,6 +1549,7 @@ async def test_cancel_invocation_stops_active_async_callback_and_is_idempotent()
         ),
         AbortContext(),
     )
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
     second = await service.CancelInvocation(
         pb.CancelInvocationRequest(
             activation_id=ACTIVATION_ID,
@@ -1556,10 +1559,14 @@ async def test_cancel_invocation_stops_active_async_callback_and_is_idempotent()
         ),
         AbortContext(),
     )
+    reused = await asyncio.wait_for(service.Invoke(request, AbortContext()), timeout=1)
+    release.set()
     response = await asyncio.wait_for(invoke_task, timeout=1)
 
     assert first.accepted
     assert not second.accepted
+    assert reused.error.code == "worker.sdk_error"
+    assert "already active" in reused.error.message
     assert response.error.code == "worker.cancelled"
     assert "test timeout" in response.error.message
     assert cancelled.is_set()

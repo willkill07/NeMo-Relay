@@ -1163,6 +1163,7 @@ async def serve_plugin(plugin: _SupportsWorkerPlugin) -> None:
 class _ActiveInvocation:
     task: asyncio.Task[Any]
     cancel_reason: str | None = None
+    cancel_requested: bool = False
 
 
 class _WorkerService(pb_grpc.PluginWorkerServicer):
@@ -1314,9 +1315,10 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
 
     async def CancelInvocation(self, request: Any, context: Any) -> Any:
         await self._authorize(request, context)
-        active = self._active_invocations.pop(request.invocation_id, None)
-        if active is None or active.task.done():
+        active = self._active_invocations.get(request.invocation_id)
+        if active is None or active.task.done() or active.cancel_requested:
             return pb.WorkerAck(accepted=False, message="invocation is not active")
+        active.cancel_requested = True
         active.cancel_reason = request.reason or "host requested cancellation"
         active.task.cancel()
         return pb.WorkerAck(accepted=True, message=f"cancellation accepted: {active.cancel_reason}")

@@ -271,8 +271,9 @@ async fn host_cancellation_reaches_rust_worker_invocation() {
             }))
             .build(),
     ));
-    started_rx
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
         .await
+        .expect("worker should call the host continuation before cancellation")
         .expect("worker should call the host continuation");
 
     execution.abort();

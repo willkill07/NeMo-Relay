@@ -54,7 +54,7 @@ use nemo_relay_worker_proto::{WORKER_PROTOCOL_GRPC_V1, decode_json_envelope, jso
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{OnceCell, mpsc};
+use tokio::sync::{OnceCell, mpsc, watch};
 use tokio_stream::wrappers::TcpListenerStream;
 #[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
@@ -829,7 +829,7 @@ struct WorkerService {
 struct ActiveInvocation {
     generation: u64,
     abort_handle: tokio::task::AbortHandle,
-    stream_tx: Option<mpsc::Sender<std::result::Result<StreamChunk, Status>>>,
+    stream_cancel: Option<watch::Sender<bool>>,
 }
 
 struct ActiveInvocationGuard {
@@ -1056,6 +1056,8 @@ impl PluginWorker for WorkerService {
             continuation_id: request.continuation_id,
         };
         let model_name = payload.model_name;
+        let (tx, rx) = mpsc::channel(16);
+        let (stream_cancel_tx, stream_cancel_rx) = watch::channel(false);
         let open_scope = scope.clone();
         let open_task = tokio::spawn(async move {
             TASK_SCOPE_CONTEXT
@@ -1068,14 +1070,17 @@ impl PluginWorker for WorkerService {
                 .await
         });
         let open_abort_handle = open_task.abort_handle();
-        let generation =
-            match self.track_invocation(&invocation_id, open_abort_handle.clone(), None) {
-                Ok(generation) => generation,
-                Err(err) => {
-                    open_task.abort();
-                    return Err(err);
-                }
-            };
+        let generation = match self.track_invocation(
+            &invocation_id,
+            open_abort_handle.clone(),
+            Some(stream_cancel_tx.clone()),
+        ) {
+            Ok(generation) => generation,
+            Err(err) => {
+                open_task.abort();
+                return Err(err);
+            }
+        };
         let mut active_guard = ActiveInvocationGuard {
             active_invocations: self.active_invocations.clone(),
             invocation_id: invocation_id.clone(),
@@ -1091,6 +1096,13 @@ impl PluginWorker for WorkerService {
             }
             Err(err) if err.is_cancelled() => {
                 abort_on_drop.disarm();
+                let explicitly_cancelled = *stream_cancel_rx.borrow();
+                if explicitly_cancelled {
+                    return Ok(Response::new(cancellation_aware_worker_stream(
+                        rx,
+                        stream_cancel_rx,
+                    )));
+                }
                 return Err(Status::cancelled("worker invocation was cancelled"));
             }
             Err(err) => {
@@ -1101,10 +1113,9 @@ impl PluginWorker for WorkerService {
             }
         };
         abort_on_drop.disarm();
-        let (tx, rx) = mpsc::channel(16);
         let active_invocations = self.active_invocations.clone();
         let task_invocation_id = invocation_id.clone();
-        let task_tx = tx.clone();
+        let task_tx = tx;
         let task = tokio::spawn(async move {
             let _active_guard = ActiveInvocationGuard {
                 active_invocations,
@@ -1151,22 +1162,26 @@ impl PluginWorker for WorkerService {
             ActiveInvocation {
                 generation,
                 abort_handle: task.abort_handle(),
-                stream_tx: Some(tx),
+                stream_cancel: Some(stream_cancel_tx),
             },
         );
         match replaced {
             Ok(true) => active_guard.disarm(),
             Ok(false) => {
                 task.abort();
-                return Err(Status::cancelled("worker invocation was cancelled"));
+                return Ok(Response::new(cancellation_aware_worker_stream(
+                    rx,
+                    stream_cancel_rx,
+                )));
             }
             Err(err) => {
                 task.abort();
                 return Err(err);
             }
         }
-        Ok(Response::new(Box::pin(
-            tokio_stream::wrappers::ReceiverStream::new(rx),
+        Ok(Response::new(cancellation_aware_worker_stream(
+            rx,
+            stream_cancel_rx,
         )))
     }
 
@@ -1189,8 +1204,8 @@ impl PluginWorker for WorkerService {
                 message: "invocation is not active".into(),
             }));
         };
-        if let Some(tx) = active.stream_tx {
-            let _ = tx.try_send(Ok(cancelled_stream_chunk()));
+        if let Some(cancel) = active.stream_cancel {
+            let _ = cancel.send(true);
         }
         active.abort_handle.abort();
         Ok(Response::new(WorkerAck {
@@ -1231,7 +1246,7 @@ impl WorkerService {
         &self,
         invocation_id: &str,
         abort_handle: tokio::task::AbortHandle,
-        stream_tx: Option<mpsc::Sender<std::result::Result<StreamChunk, Status>>>,
+        stream_cancel: Option<watch::Sender<bool>>,
     ) -> std::result::Result<u64, Status> {
         let generation = self
             .next_invocation_generation
@@ -1241,7 +1256,7 @@ impl WorkerService {
             ActiveInvocation {
                 generation,
                 abort_handle,
-                stream_tx,
+                stream_cancel,
             },
         )?;
         Ok(generation)
@@ -1729,6 +1744,53 @@ fn cancelled_stream_chunk() -> StreamChunk {
             cancelled_worker_error(),
         )),
     }
+}
+
+fn cancellation_aware_worker_stream(
+    rx: mpsc::Receiver<std::result::Result<StreamChunk, Status>>,
+    cancel_rx: watch::Receiver<bool>,
+) -> Pin<Box<dyn Stream<Item = std::result::Result<StreamChunk, Status>> + Send>> {
+    #[derive(Clone, Copy)]
+    enum CancellationState {
+        Watching,
+        Closed,
+        Done,
+    }
+
+    Box::pin(futures_util::stream::unfold(
+        (rx, cancel_rx, CancellationState::Watching),
+        |(mut rx, mut cancel_rx, mut state)| async move {
+            if matches!(state, CancellationState::Done) {
+                return None;
+            }
+            loop {
+                if matches!(state, CancellationState::Closed) {
+                    return rx
+                        .recv()
+                        .await
+                        .map(|item| (item, (rx, cancel_rx, CancellationState::Closed)));
+                }
+                tokio::select! {
+                    biased;
+                    changed = cancel_rx.changed() => match changed {
+                        Ok(()) if *cancel_rx.borrow() => {
+                            return Some((
+                                Ok(cancelled_stream_chunk()),
+                                (rx, cancel_rx, CancellationState::Done),
+                            ));
+                        }
+                        Ok(()) => {}
+                        Err(_) => state = CancellationState::Closed,
+                    },
+                    item = rx.recv() => {
+                        return item.map(|item| {
+                            (item, (rx, cancel_rx, CancellationState::Watching))
+                        });
+                    }
+                }
+            }
+        },
+    ))
 }
 
 fn worker_error_to_sdk(error: WorkerError) -> WorkerSdkError {

@@ -566,10 +566,20 @@ async fn callback_timeout_sends_explicit_worker_cancellation() {
     );
     let invocation_id = request.invocation_id.clone();
 
-    let result = callback
-        .invoke_async_with_timeout(request, std::time::Duration::from_millis(10))
-        .await;
-    started_rx.await.expect("worker invocation should start");
+    let callback_task = callback.clone();
+    let task = tokio::spawn(async move {
+        callback_task
+            .invoke_async_with_timeout(request, std::time::Duration::from_millis(10))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+        .await
+        .expect("worker invocation should start before timeout assertion")
+        .expect("worker invocation should start");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("timed out invocation should complete")
+        .expect("timed out invocation task should join");
     let cancellation = tokio::time::timeout(std::time::Duration::from_secs(1), cancel_rx.recv())
         .await
         .expect("host should send cancellation after timeout")
@@ -620,7 +630,10 @@ async fn dropping_callback_future_cancels_worker_and_cleans_host_state() {
     let invocation_id = request.invocation_id.clone();
     let callback_task = callback.clone();
     let task = tokio::spawn(async move { callback_task.invoke_async(request).await });
-    started_rx.await.expect("worker invocation should start");
+    tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+        .await
+        .expect("worker invocation should start before caller abort")
+        .expect("worker invocation should start");
 
     task.abort();
     let _ = task.await;
@@ -678,7 +691,7 @@ async fn dropping_host_stream_sends_explicit_worker_cancellation() {
         },
     )
     .await;
-    let stream = callback
+    let mut stream = callback
         .invoke_llm_stream_execution(
             "cancel_stream",
             "model",
@@ -689,8 +702,15 @@ async fn dropping_host_stream_sends_explicit_worker_cancellation() {
         )
         .await
         .expect("host stream should be returned");
+    yield_tx
+        .send(())
+        .expect("worker stream yield signal should be delivered");
+    tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+        .await
+        .expect("worker stream should yield before abandonment")
+        .expect("worker stream should yield before abandonment")
+        .expect("worker stream chunk should be valid");
     drop(stream);
-    yield_tx.send(()).expect("stream should advance after drop");
 
     let cancellation = tokio::time::timeout(std::time::Duration::from_secs(1), cancel_rx.recv())
         .await
