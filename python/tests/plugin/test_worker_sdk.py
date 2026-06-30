@@ -1627,6 +1627,40 @@ async def test_cancel_invocation_stops_active_async_stream():
     assert cancelled.is_set()
 
 
+async def test_stream_callback_cancellation_without_host_reason_is_terminal_error():
+    class CancelledStreamPlugin(WorkerPlugin):
+        plugin_id = "tests.cancelled_stream"
+
+        def register(self, ctx: PluginContext, config: Json) -> None:
+            del config
+
+            async def llm_stream(model_name: str, request: Json, next_call: Any) -> AsyncIterator[Json]:
+                del model_name, request, next_call
+                if False:
+                    yield {}
+                raise asyncio.CancelledError
+
+            ctx.register_llm_stream_execution_intercept("cancelled_stream", llm_stream)
+
+    service = _service(CancelledStreamPlugin(), RecordingHostStub())
+    await _register(service)
+    request = _invoke_request(
+        "cancelled_stream",
+        pb.LLM_STREAM_EXECUTION_INTERCEPT,
+        invocation_id="self-cancelled-stream",
+        llm=_llm_payload(),
+    )
+
+    async def consume() -> list[Any]:
+        return [chunk async for chunk in service.InvokeStream(request, AbortContext())]
+
+    chunks = await asyncio.wait_for(consume(), timeout=1)
+
+    assert len(chunks) == 1
+    assert chunks[0].error.code == "worker.cancelled"
+    assert "stream callback cancelled without a host request" in chunks[0].error.message
+
+
 def test_required_environment_reports_missing_value(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("NEMO_RELAY_WORKER_SOCKET", raising=False)
     with pytest.raises(WorkerSdkError, match="NEMO_RELAY_WORKER_SOCKET"):

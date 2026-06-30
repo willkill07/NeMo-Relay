@@ -627,6 +627,56 @@ async fn dropping_callback_future_cancels_worker_and_cleans_host_state() {
         Some(continuation_id),
         Some(invoke_request_payload_tool("tool", json!({}))),
     );
+    let scope_stack_id = request
+        .scope
+        .as_ref()
+        .expect("worker invocation should have a scope stack")
+        .scope_stack_id
+        .clone();
+    let invocation_stack = callback
+        .host_state
+        .stack(&scope_stack_id)
+        .expect("invocation scope stack lookup should succeed")
+        .expect("invocation scope stack should exist");
+    let baseline_depth = invocation_stack
+        .read()
+        .expect("invocation scope stack lock")
+        .scopes()
+        .len();
+    let host_runtime = WorkerHostRuntimeService {
+        state: callback.host_state.clone(),
+    };
+    for name in ["cancelled-outer", "cancelled-inner"] {
+        let pushed = host_runtime
+            .push_scope(Request::new(PushScopeRequest {
+                activation_id: ACTIVATION_ID.into(),
+                auth_token: AUTH_TOKEN.into(),
+                scope: Some(ScopeContext {
+                    scope_stack_id: scope_stack_id.clone(),
+                    parent_scope_id: String::new(),
+                }),
+                name: name.into(),
+                scope_type: ProtoScopeType::Custom as i32,
+                data: None,
+                metadata: None,
+                input: None,
+            }))
+            .await
+            .expect("worker scope should push")
+            .into_inner();
+        assert!(pushed.error.is_none());
+    }
+    assert_eq!(
+        invocation_stack
+            .read()
+            .expect("invocation scope stack lock")
+            .scopes()
+            .len(),
+        baseline_depth + 2
+    );
+    let overlapping_scope_stack_id = callback
+        .host_state
+        .insert_invocation_scope_stack(invocation_stack.clone());
     let invocation_id = request.invocation_id.clone();
     let callback_task = callback.clone();
     let task = tokio::spawn(async move { callback_task.invoke_async(request).await });
@@ -655,10 +705,68 @@ async fn dropping_callback_future_cancels_worker_and_cleans_host_state() {
     assert!(
         callback
             .host_state
+            .scope_handles
+            .lock()
+            .expect("scope handle lock")
+            .is_empty()
+    );
+    assert_eq!(
+        callback
+            .host_state
+            .scope_stacks
+            .lock()
+            .expect("scope lock")
+            .len(),
+        1
+    );
+    assert_eq!(
+        invocation_stack
+            .read()
+            .expect("invocation scope stack lock")
+            .scopes()
+            .len(),
+        baseline_depth + 2
+    );
+    callback
+        .host_state
+        .cleanup_invocation_scope_stack(&overlapping_scope_stack_id);
+    assert!(
+        callback
+            .host_state
             .scope_stacks
             .lock()
             .expect("scope lock")
             .is_empty()
+    );
+    assert!(
+        callback
+            .host_state
+            .pending_scope_cleanups
+            .lock()
+            .expect("pending cleanup lock")
+            .is_empty()
+    );
+    assert_eq!(
+        invocation_stack
+            .read()
+            .expect("invocation scope stack lock")
+            .scopes()
+            .len(),
+        baseline_depth
+    );
+    callback
+        .host_state
+        .cleanup_invocation_scope_stack(&scope_stack_id);
+    callback
+        .host_state
+        .cleanup_invocation_scope_stack(&overlapping_scope_stack_id);
+    assert_eq!(
+        invocation_stack
+            .read()
+            .expect("invocation scope stack lock")
+            .scopes()
+            .len(),
+        baseline_depth
     );
 }
 

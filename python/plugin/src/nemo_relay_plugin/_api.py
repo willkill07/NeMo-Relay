@@ -1296,7 +1296,7 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
         try:
             while True:
                 if active.task.done() and queue.empty():
-                    return
+                    break
                 next_item = asyncio.create_task(queue.get())
                 done, _ = await asyncio.wait((next_item, active.task), return_when=asyncio.FIRST_COMPLETED)
                 if next_item in done:
@@ -1306,7 +1306,9 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
                 await asyncio.gather(next_item, return_exceptions=True)
                 while not queue.empty():
                     yield queue.get_nowait()
-                return
+                break
+            if active.task.cancelled() and active.cancel_reason is None:
+                yield pb.StreamChunk(error=_cancelled_worker_error("stream callback cancelled without a host request"))
         finally:
             if not active.task.done():
                 active.task.cancel()

@@ -1047,7 +1047,7 @@ impl WorkerInvocationGuard {
         }
         if !self.scope_stack_id.is_empty() {
             self.host_state
-                .remove_invocation_scope_stack(&self.scope_stack_id);
+                .cleanup_invocation_scope_stack(&self.scope_stack_id);
         }
     }
 }
@@ -1546,9 +1546,20 @@ where
 struct WorkerHostRuntimeState {
     activation_id: String,
     auth_token: String,
-    scope_stacks: Mutex<HashMap<String, crate::api::runtime::ScopeStackHandle>>,
+    scope_stacks: Mutex<HashMap<String, StoredScopeStack>>,
+    pending_scope_cleanups: Mutex<Vec<PendingScopeCleanup>>,
     scope_handles: Mutex<HashMap<String, StoredScopeHandle>>,
     continuations: Mutex<HashMap<String, Continuation>>,
+}
+
+struct StoredScopeStack {
+    handle: crate::api::runtime::ScopeStackHandle,
+    invocation_base_depth: Option<usize>,
+}
+
+struct PendingScopeCleanup {
+    handle: crate::api::runtime::ScopeStackHandle,
+    base_depth: usize,
 }
 
 struct StoredScopeHandle {
@@ -1562,6 +1573,7 @@ impl WorkerHostRuntimeState {
             activation_id,
             auth_token,
             scope_stacks: Mutex::new(HashMap::new()),
+            pending_scope_cleanups: Mutex::new(Vec::new()),
             scope_handles: Mutex::new(HashMap::new()),
             continuations: Mutex::new(HashMap::new()),
         }
@@ -1580,14 +1592,84 @@ impl WorkerHostRuntimeState {
     ) -> String {
         let id = format!("invoke-{}", Uuid::now_v7());
         if let Ok(mut stacks) = self.scope_stacks.lock() {
-            stacks.insert(id.clone(), stack);
+            let invocation_base_depth = stack
+                .read()
+                .expect("scope stack lock poisoned")
+                .scopes()
+                .len();
+            stacks.insert(
+                id.clone(),
+                StoredScopeStack {
+                    handle: stack,
+                    invocation_base_depth: Some(invocation_base_depth),
+                },
+            );
         }
         id
     }
 
-    fn remove_invocation_scope_stack(&self, id: &str) {
-        if let Ok(mut stacks) = self.scope_stacks.lock() {
-            stacks.remove(id);
+    fn cleanup_invocation_scope_stack(&self, id: &str) {
+        let Ok(mut stacks) = self.scope_stacks.lock() else {
+            return;
+        };
+        let Some(stored) = stacks.remove(id) else {
+            return;
+        };
+        if let Some(mut base_depth) = stored.invocation_base_depth {
+            let has_active_alias = stacks.values().any(|candidate| {
+                candidate.invocation_base_depth.is_some()
+                    && Arc::ptr_eq(&candidate.handle, &stored.handle)
+            });
+            if let Ok(mut pending) = self.pending_scope_cleanups.lock() {
+                if has_active_alias {
+                    pending.push(PendingScopeCleanup {
+                        handle: stored.handle,
+                        base_depth,
+                    });
+                } else {
+                    pending.retain(|cleanup| {
+                        if Arc::ptr_eq(&cleanup.handle, &stored.handle) {
+                            base_depth = base_depth.min(cleanup.base_depth);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    Self::unwind_scope_stack(&stored.handle, base_depth);
+                }
+            } else if !has_active_alias {
+                Self::unwind_scope_stack(&stored.handle, base_depth);
+            }
+        }
+        if let Ok(mut handles) = self.scope_handles.lock() {
+            handles.retain(|_, handle| handle.scope_stack_id != id);
+        }
+    }
+
+    fn unwind_scope_stack(stack: &crate::api::runtime::ScopeStackHandle, base_depth: usize) {
+        loop {
+            let top_uuid = {
+                let Ok(stack) = stack.read() else {
+                    return;
+                };
+                if stack.scopes().len() <= base_depth {
+                    return;
+                }
+                stack.top().uuid
+            };
+            let popped = with_scope_stack(stack.clone(), || {
+                pop_scope(PopScopeParams::builder().handle_uuid(&top_uuid).build())
+            })
+            .is_ok();
+            if popped {
+                continue;
+            }
+            let Ok(mut stack) = stack.write() else {
+                return;
+            };
+            if stack.remove(&top_uuid).is_err() {
+                return;
+            }
         }
     }
 
@@ -1624,7 +1706,7 @@ impl WorkerHostRuntimeState {
             .lock()
             .map_err(|err| Status::internal(format!("scope stack lock poisoned: {err}")))?
             .get(id)
-            .cloned()
+            .map(|stored| stored.handle.clone())
             .map(Some)
             .ok_or_else(|| Status::not_found("scope stack not found"))
     }
@@ -1759,7 +1841,13 @@ impl RelayHostRuntime for WorkerHostRuntimeService {
             .scope_stacks
             .lock()
             .map_err(|err| Status::internal(format!("scope stack lock poisoned: {err}")))?
-            .insert(id.clone(), crate::api::runtime::create_scope_stack());
+            .insert(
+                id.clone(),
+                StoredScopeStack {
+                    handle: crate::api::runtime::create_scope_stack(),
+                    invocation_base_depth: None,
+                },
+            );
         Ok(Response::new(CreateScopeStackResponse {
             scope_stack_id: id,
             error: None,
