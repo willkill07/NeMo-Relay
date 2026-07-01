@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -65,7 +67,13 @@ pub(crate) async fn serve_with_dynamic(
             CliError::Io(err)
         }
     })?;
-    serve_listener_with_dynamic(listener, config, dynamic_plugins, None).await
+    serve_listener_with_dynamic_inner(
+        listener,
+        config,
+        dynamic_plugins,
+        Some(ShutdownMode::ProcessSignal),
+    )
+    .await
 }
 
 /// Serves the gateway router on a caller-owned listener with optional graceful shutdown.
@@ -88,36 +96,71 @@ pub(crate) async fn serve_listener_with_dynamic(
     dynamic_plugins: Vec<ActiveDynamicPluginComponent>,
     shutdown: Option<oneshot::Receiver<()>>,
 ) -> Result<(), CliError> {
+    serve_listener_with_dynamic_inner(
+        listener,
+        config,
+        dynamic_plugins,
+        shutdown.map(ShutdownMode::Receiver),
+    )
+    .await
+}
+
+type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+enum ShutdownMode {
+    Receiver(oneshot::Receiver<()>),
+    ProcessSignal,
+}
+
+async fn serve_listener_with_dynamic_inner(
+    listener: TcpListener,
+    config: GatewayConfig,
+    dynamic_plugins: Vec<ActiveDynamicPluginComponent>,
+    shutdown_mode: Option<ShutdownMode>,
+) -> Result<(), CliError> {
     let plugin_activation =
         PluginActivation::initialize(config.plugin_config.clone(), dynamic_plugins).await?;
     let state = AppState::new(config);
     let sessions = state.sessions.clone();
     let last_activity = state.last_activity.clone();
     let app = router_with_state(state);
-    let idle_shutdown = (shutdown.is_none())
+    let idle_shutdown = matches!(&shutdown_mode, None | Some(ShutdownMode::ProcessSignal))
         .then(plugin_idle_timeout)
         .flatten()
         .map(|timeout| idle_shutdown_future(last_activity, sessions.clone(), timeout));
-    let serve_result = match (shutdown, idle_shutdown) {
-        (Some(receiver), _) => {
+    let shutdown: Option<ShutdownFuture> = match shutdown_mode {
+        Some(ShutdownMode::Receiver(receiver)) => Some(Box::pin(async move {
+            let _ = receiver.await;
+        })),
+        Some(ShutdownMode::ProcessSignal) => Some(Box::pin(async move {
+            if let Some(idle) = idle_shutdown {
+                tokio::select! {
+                    _ = shutdown_signal() => {}
+                    _ = idle => {}
+                }
+            } else {
+                shutdown_signal().await;
+            }
+        })),
+        None => idle_shutdown.map(|idle| Box::pin(idle) as ShutdownFuture),
+    };
+    let serve_result = match shutdown {
+        Some(shutdown) => {
             axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = receiver.await;
-                })
+                .with_graceful_shutdown(shutdown)
                 .await
         }
-        (None, Some(idle)) => {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(idle)
-                .await
-        }
-        (None, None) => axum::serve(listener, app).await,
+        None => axum::serve(listener, app).await,
     };
     let close_result = sessions.close_all("gateway_shutdown").await;
+    let flush_result = nemo_relay::api::runtime::flush_subscribers().map_err(CliError::from);
     let clear_result = plugin_activation.clear();
     if let Err(serve_error) = serve_result {
         if let Err(close_error) = close_result {
             eprintln!("session teardown failed after server error: {close_error}");
+        }
+        if let Err(flush_error) = flush_result {
+            eprintln!("subscriber flush failed after server error: {flush_error}");
         }
         if let Err(clear_error) = clear_result {
             eprintln!("plugin teardown failed after server error: {clear_error}");
@@ -125,7 +168,36 @@ pub(crate) async fn serve_listener_with_dynamic(
         return Err(serve_error.into());
     }
     close_result?;
+    flush_result?;
     clear_result
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("installing SIGTERM handler should succeed");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let mut ctrl_shutdown = tokio::signal::windows::ctrl_shutdown()
+            .expect("installing Windows shutdown handler should succeed");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = ctrl_shutdown.recv() => {}
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Builds the gateway HTTP router and shared state.
