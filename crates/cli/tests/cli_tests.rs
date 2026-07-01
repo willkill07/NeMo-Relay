@@ -1558,7 +1558,8 @@ mode = "append"
     assert!(!stdout.contains("atif_dir"));
     assert!(!stdout.contains("openinference_endpoint"));
     assert!(stdout.contains("argv = codex"));
-    assert!(stdout.contains("ATOF logs/events.jsonl"));
+    let expected_atof_path = std::path::Path::new("logs").join("events.jsonl");
+    assert!(stdout.contains(&format!("ATOF {}", expected_atof_path.display())));
 }
 
 #[test]
