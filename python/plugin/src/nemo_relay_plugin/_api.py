@@ -1164,6 +1164,7 @@ class _ActiveInvocation:
     task: asyncio.Task[Any]
     cancel_reason: str | None = None
     cancel_requested: bool = False
+    cancel_callback: Callable[[str], None] | None = None
 
 
 class _WorkerService(pb_grpc.PluginWorkerServicer):
@@ -1263,10 +1264,13 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
     async def InvokeStream(self, request: Any, context: Any) -> AsyncIterator[Any]:
         await self._authorize(request, context)
         queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=16)
-        active_ref: list[_ActiveInvocation] = []
+
+        def cancel_stream(reason: str) -> None:
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait(pb.StreamChunk(error=_cancelled_worker_error(reason)))
 
         async def produce() -> None:
-            active = active_ref[0]
             try:
                 if request.surface != pb.LLM_STREAM_EXECUTION_INTERCEPT:
                     raise WorkerSdkError("InvokeStream only supports LLM stream execution intercepts")
@@ -1279,17 +1283,13 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
                     async for value in _as_async_iter(stream):
                         await queue.put(pb.StreamChunk(value=_json_envelope(JSON_SCHEMA, value)))
             except asyncio.CancelledError:
-                if active.cancel_reason is not None:
-                    while not queue.empty():
-                        queue.get_nowait()
-                    queue.put_nowait(pb.StreamChunk(error=_cancelled_worker_error(active.cancel_reason)))
                 raise
             except Exception as exc:  # noqa: BLE001 - callback failure is protocol data.
                 await queue.put(pb.StreamChunk(error=_sdk_error_to_worker(exc)))
 
         try:
             active = self._start_invocation(request.invocation_id, produce())
-            active_ref.append(active)
+            active.cancel_callback = cancel_stream
         except Exception as exc:  # noqa: BLE001 - callback failure is protocol data.
             yield pb.StreamChunk(error=_sdk_error_to_worker(exc))
             return
@@ -1300,7 +1300,10 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
                 next_item = asyncio.create_task(queue.get())
                 done, _ = await asyncio.wait((next_item, active.task), return_when=asyncio.FIRST_COMPLETED)
                 if next_item in done:
-                    yield next_item.result()
+                    item = next_item.result()
+                    if active.cancel_requested and item.error.code != "worker.cancelled":
+                        continue
+                    yield item
                     continue
                 next_item.cancel()
                 await asyncio.gather(next_item, return_exceptions=True)
@@ -1318,11 +1321,16 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
     async def CancelInvocation(self, request: Any, context: Any) -> Any:
         await self._authorize(request, context)
         active = self._active_invocations.get(request.invocation_id)
-        if active is None or active.task.done() or active.cancel_requested:
+        if active is None or active.cancel_requested:
+            return pb.WorkerAck(accepted=False, message="invocation is not active")
+        if active.task.done() and active.cancel_callback is None:
             return pb.WorkerAck(accepted=False, message="invocation is not active")
         active.cancel_requested = True
         active.cancel_reason = request.reason or "host requested cancellation"
-        active.task.cancel()
+        if active.cancel_callback is not None:
+            active.cancel_callback(active.cancel_reason)
+        if not active.task.done():
+            active.task.cancel()
         return pb.WorkerAck(accepted=True, message=f"cancellation accepted: {active.cancel_reason}")
 
     async def Shutdown(self, request: Any, context: Any) -> Any:
@@ -1453,13 +1461,12 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
             coroutine.close()
             raise WorkerSdkError("invocation_id must not be empty")
         current = self._active_invocations.get(invocation_id)
-        if current is not None and not current.task.done():
+        if current is not None:
             coroutine.close()
             raise WorkerSdkError(f"invocation '{invocation_id}' is already active")
         task = asyncio.create_task(coroutine)
         active = _ActiveInvocation(task=task)
         self._active_invocations[invocation_id] = active
-        task.add_done_callback(lambda _: self._forget_invocation(invocation_id, active))
         return active
 
     def _forget_invocation(self, invocation_id: str, active: _ActiveInvocation) -> None:

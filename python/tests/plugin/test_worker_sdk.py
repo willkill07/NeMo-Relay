@@ -1627,6 +1627,60 @@ async def test_cancel_invocation_stops_active_async_stream():
     assert cancelled.is_set()
 
 
+async def test_cancel_invocation_discards_buffered_chunks_after_stream_callback_finishes():
+    finished = asyncio.Event()
+
+    class BufferedStreamPlugin(WorkerPlugin):
+        plugin_id = "tests.buffered_stream"
+
+        def register(self, ctx: PluginContext, config: Json) -> None:
+            del config
+
+            async def llm_stream(model_name: str, request: Json, next_call: Any) -> AsyncIterator[Json]:
+                del model_name, request, next_call
+                for index in range(4):
+                    yield {"index": index}
+                finished.set()
+
+            ctx.register_llm_stream_execution_intercept("buffered_stream", llm_stream)
+
+    service = _service(BufferedStreamPlugin(), RecordingHostStub())
+    await _register(service)
+    request = _invoke_request(
+        "buffered_stream",
+        pb.LLM_STREAM_EXECUTION_INTERCEPT,
+        invocation_id="buffered-stream",
+        llm=_llm_payload(),
+    )
+    stream = service.InvokeStream(request, AbortContext())
+
+    first = await asyncio.wait_for(anext(stream), timeout=1)
+    await asyncio.wait_for(finished.wait(), timeout=1)
+    assert not first.error.code
+    assert "buffered-stream" in service._active_invocations
+
+    ack = await service.CancelInvocation(
+        pb.CancelInvocationRequest(
+            activation_id=ACTIVATION_ID,
+            invocation_id="buffered-stream",
+            auth_token=AUTH_TOKEN,
+            reason="stop buffered stream",
+        ),
+        AbortContext(),
+    )
+
+    async def consume_remaining() -> list[Any]:
+        return [chunk async for chunk in stream]
+
+    remaining = await asyncio.wait_for(consume_remaining(), timeout=1)
+
+    assert ack.accepted
+    assert len(remaining) == 1
+    assert remaining[0].error.code == "worker.cancelled"
+    assert "stop buffered stream" in remaining[0].error.message
+    assert "buffered-stream" not in service._active_invocations
+
+
 async def test_stream_callback_cancellation_without_host_reason_is_terminal_error():
     class CancelledStreamPlugin(WorkerPlugin):
         plugin_id = "tests.cancelled_stream"

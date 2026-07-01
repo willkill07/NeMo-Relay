@@ -526,10 +526,10 @@ async fn callback_stream_stops_when_host_receiver_is_dropped() {
     yield_tx
         .send(())
         .expect("worker stream yield signal should be delivered");
-    stream
-        .next()
+    tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
         .await
-        .expect("worker stream should yield before it is abandoned")
+        .expect("worker stream should yield before timing out")
+        .expect("worker stream ended before yielding a chunk")
         .expect("worker stream chunk should be valid");
     drop(stream);
     tokio::time::timeout(std::time::Duration::from_secs(1), stream_dropped_rx)
@@ -766,6 +766,71 @@ async fn dropping_callback_future_cancels_worker_and_cleans_host_state() {
             .expect("invocation scope stack lock")
             .scopes()
             .len(),
+        baseline_depth
+    );
+}
+
+#[test]
+fn invocation_cleanup_releases_host_state_locks_before_unwinding() {
+    let state = Arc::new(WorkerHostRuntimeState::new(
+        ACTIVATION_ID.into(),
+        AUTH_TOKEN.into(),
+    ));
+    let stack = crate::api::runtime::create_scope_stack();
+    let baseline_depth = stack.read().expect("scope stack lock").scopes().len();
+    let scope_stack_id = state.insert_invocation_scope_stack(stack.clone());
+    with_scope_stack(stack.clone(), || {
+        push_scope(
+            PushScopeParams::builder()
+                .name("cleanup-lock-test")
+                .scope_type(ScopeType::Custom)
+                .build(),
+        )
+    })
+    .expect("worker scope should push");
+
+    let stack_guard = stack.write().expect("scope stack lock");
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let cleanup_state = state.clone();
+    let cleanup = std::thread::spawn(move || {
+        cleanup_state.cleanup_invocation_scope_stack(&scope_stack_id);
+        let _ = done_tx.send(());
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let cleanup_registered = state
+            .scope_stack_cleanups
+            .lock()
+            .expect("scope cleanup lock")
+            .iter()
+            .any(|handle| Arc::ptr_eq(handle, &stack));
+        if cleanup_registered {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scope cleanup should register before unwinding"
+        );
+        std::thread::yield_now();
+    }
+
+    assert!(state.scope_stacks.try_lock().is_ok());
+    assert!(state.pending_scope_cleanups.try_lock().is_ok());
+    drop(stack_guard);
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("scope cleanup thread should finish before timing out");
+    cleanup.join().expect("scope cleanup thread should finish");
+
+    assert!(
+        state
+            .scope_stack_cleanups
+            .lock()
+            .expect("scope cleanup lock")
+            .is_empty()
+    );
+    assert_eq!(
+        stack.read().expect("scope stack lock").scopes().len(),
         baseline_depth
     );
 }
