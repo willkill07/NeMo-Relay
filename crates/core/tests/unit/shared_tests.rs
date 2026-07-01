@@ -57,10 +57,9 @@ impl LlmCodec for SharedTestCodec {
     fn encode(&self, annotated: &AnnotatedLlmRequest, original: &LlmRequest) -> Result<LlmRequest> {
         let mut content = original.content.clone();
         content["encoded_model"] = json!(annotated.model.clone());
-        Ok(LlmRequest {
-            headers: original.headers.clone(),
-            content,
-        })
+        let mut headers = original.headers.clone();
+        headers.insert("x-codec-encoded".into(), json!(true));
+        Ok(LlmRequest { headers, content })
     }
 }
 
@@ -216,6 +215,10 @@ fn test_run_request_intercepts_with_codec_none_and_codec_paths() {
         Some(&json!(true))
     );
     assert_eq!(
+        request_with_codec.headers.get("x-codec-encoded"),
+        Some(&json!(true))
+    );
+    assert_eq!(
         request_with_codec.content["encoded_model"],
         json!("intercepted-model")
     );
@@ -283,6 +286,45 @@ fn test_run_request_intercepts_injects_dynamo_agent_lineage() {
         request.headers.get(DYNAMO_PARENT_SESSION_ID_HEADER_KEY),
         Some(&json!("parent-session"))
     );
+
+    let duplicate_id_child = push_scope(
+        crate::api::scope::PushScopeParams::builder()
+            .name("duplicate-id-child")
+            .scope_type(ScopeType::Agent)
+            .metadata(json!({"session_id": "child-session"}))
+            .parent(&child)
+            .build(),
+    )
+    .unwrap();
+    let (request_with_codec, _, _) = run_request_intercepts_with_codec(
+        "openai.responses",
+        LlmRequest {
+            headers: Map::new(),
+            content: json!({"prompt": "hello"}),
+        },
+        Some(Arc::new(SharedTestCodec)),
+    )
+    .unwrap();
+    assert_eq!(
+        request_with_codec.headers.get(DYNAMO_SESSION_ID_HEADER_KEY),
+        Some(&json!("child-session"))
+    );
+    assert_eq!(
+        request_with_codec
+            .headers
+            .get(DYNAMO_PARENT_SESSION_ID_HEADER_KEY),
+        Some(&json!("child-session"))
+    );
+    assert_eq!(
+        request_with_codec.headers.get("x-codec-encoded"),
+        Some(&json!(true))
+    );
+    pop_scope(
+        crate::api::scope::PopScopeParams::builder()
+            .handle_uuid(&duplicate_id_child.uuid)
+            .build(),
+    )
+    .unwrap();
 
     pop_scope(
         crate::api::scope::PopScopeParams::builder()

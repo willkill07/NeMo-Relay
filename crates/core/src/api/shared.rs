@@ -59,9 +59,7 @@ pub(crate) fn resolve_agent_session_ids() -> Option<(String, Option<String>)> {
         .filter(|scope| matches!(scope.scope_type, ScopeType::Agent))
         .rev();
     let current = agent_scopes.next().map(agent_scope_id)?;
-    let parent = agent_scopes
-        .map(agent_scope_id)
-        .find(|candidate| candidate != &current);
+    let parent = agent_scopes.next().map(agent_scope_id);
     Some((current, parent))
 }
 
@@ -179,7 +177,7 @@ pub(crate) fn run_request_intercepts_with_codec(
     match (codec, outcome.annotated_request) {
         (Some(codec), Some(annotated)) => {
             let mut encoded = codec.encode(&annotated, &request)?;
-            encoded.headers = request.headers;
+            encoded.headers.extend(request.headers);
             Ok((encoded, Some(Arc::new(annotated)), pending_marks))
         }
         (_, annotated) => Ok((request, annotated.map(Arc::new), pending_marks)),
