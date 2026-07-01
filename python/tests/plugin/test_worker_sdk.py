@@ -13,7 +13,7 @@ import socket
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest import mock
 
 import pytest
@@ -27,6 +27,8 @@ from nemo_relay_plugin import (  # noqa: E402
     ConfigDiagnostic,
     DiagnosticLevel,
     Json,
+    LlmRequestInterceptOutcome,
+    PendingMarkSpec,
     PluginContext,
     PluginRuntime,
     ScopeType,
@@ -40,6 +42,7 @@ from nemo_relay_plugin._api import (  # noqa: E402
     ANNOTATED_LLM_REQUEST_SCHEMA,
     EVENT_SCHEMA,
     JSON_SCHEMA,
+    LLM_REQUEST_INTERCEPT_OUTCOME_SCHEMA,
     LLM_REQUEST_SCHEMA,
     WORKER_PROTOCOL,
     _announced_worker_endpoint,
@@ -203,9 +206,13 @@ class AllSurfacesPlugin(WorkerPlugin):
             del request
             return "llm blocked"
 
-        def llm_request(name: str, request: Json, annotated: Json | None) -> tuple[Json, Json]:
+        def llm_request(name: str, request: Json, annotated: Json | None) -> LlmRequestInterceptOutcome:
             del name
-            return _tag_llm_request(request, "llm_request"), _tag(annotated or {}, "annotated")
+            return LlmRequestInterceptOutcome(
+                request=_tag_llm_request(request, "llm_request"),
+                annotated_request=_tag(annotated, "annotated") if annotated is not None else None,
+                pending_marks=[PendingMarkSpec("worker.pending", data={"source": "python"})],
+            )
 
         async def llm_execution(name: str, request: Json, next_call: Any) -> Json:
             result = await next_call.call(_tag_llm_request(request, f"llm_execute_{name}"))
@@ -939,9 +946,32 @@ async def test_unary_invoke_success_paths(service: _WorkerService, host_stub: Re
         ),
         AbortContext(),
     )
-    assert _envelope_value(llm_request.llm_request.request)["content"]["llm_request"]
-    assert _envelope_value(llm_request.llm_request.annotated_request)["tag"] == "annotated"
-    assert llm_request.llm_request.has_annotated_request
+    assert llm_request.llm_request.outcome.schema == LLM_REQUEST_INTERCEPT_OUTCOME_SCHEMA
+    outcome = _envelope_value(llm_request.llm_request.outcome)
+    assert outcome["request"]["content"]["llm_request"]
+    assert outcome["annotated_request"]["tag"] == "annotated"
+    assert outcome["pending_marks"] == [
+        {
+            "name": "worker.pending",
+            "category": None,
+            "category_profile": None,
+            "data": {"source": "python"},
+            "metadata": None,
+        }
+    ]
+
+    request_only = await service.Invoke(
+        _invoke_request(
+            "llm_request",
+            pb.LLM_REQUEST_INTERCEPT,
+            llm=_llm_payload(request={"content": {"prompt": "hello"}}),
+        ),
+        AbortContext(),
+    )
+    request_only_outcome = _envelope_value(request_only.llm_request.outcome)
+    assert request_only_outcome["request"]["content"]["llm_request"]
+    assert request_only_outcome["annotated_request"] is None
+    assert request_only_outcome["pending_marks"] == outcome["pending_marks"]
 
     llm_execution = await _invoke_json_async(
         service,
@@ -1013,8 +1043,8 @@ async def test_llm_request_intercept_rejects_non_object_typed_results(invalid_pa
             def invalid_result(name: str, request: Json, annotated: Json | None) -> Any:
                 del name
                 if invalid_part == "request":
-                    return []
-                return request, []
+                    return LlmRequestInterceptOutcome(request=cast(Any, []))
+                return LlmRequestInterceptOutcome(request=request, annotated_request=cast(Any, []))
 
             ctx.register_llm_request_intercept("invalid", invalid_result)
 
@@ -1129,9 +1159,9 @@ async def test_llm_request_intercept_can_return_request_without_annotation():
         def register(self, ctx: PluginContext, config: Json) -> None:
             del config
 
-            def llm_request(name: str, request: Json, annotated: Json | None) -> Json:
+            def llm_request(name: str, request: Json, annotated: Json | None) -> LlmRequestInterceptOutcome:
                 del name, annotated
-                return _tag_llm_request(request, "request_only")
+                return LlmRequestInterceptOutcome(request=_tag_llm_request(request, "request_only"))
 
             ctx.register_llm_request_intercept("request_only", llm_request)
 
@@ -1145,8 +1175,10 @@ async def test_llm_request_intercept_can_return_request_without_annotation():
         ),
         AbortContext(),
     )
-    assert _envelope_value(response.llm_request.request)["content"]["request_only"]
-    assert not response.llm_request.has_annotated_request
+    outcome = _envelope_value(response.llm_request.outcome)
+    assert outcome["request"]["content"]["request_only"]
+    assert outcome["annotated_request"] is None
+    assert outcome["pending_marks"] == []
 
 
 async def test_stream_invoke_success_and_failures(service: _WorkerService, host_stub: RecordingHostStub):

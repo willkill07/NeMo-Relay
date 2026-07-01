@@ -384,29 +384,31 @@ async fn callback_helpers_cover_worker_response_edges() {
             },
             "llm_intercept_invalid_request" => InvokeResponse {
                 result: Some(InvokeResult::LlmRequest(LlmRequestInterceptResult {
-                    request: Some(JsonEnvelope {
-                        schema: LLM_REQUEST_SCHEMA.into(),
-                        json: b"null".to_vec(),
+                    outcome: Some(JsonEnvelope {
+                        schema: "nemo.relay.LlmRequestInterceptOutcome@1".into(),
+                        json: br#"{"request":null}"#.to_vec(),
                     }),
-                    annotated_request: None,
-                    has_annotated_request: false,
                 })),
             },
             "llm_intercept_missing_annotated" => InvokeResponse {
                 result: Some(InvokeResult::LlmRequest(LlmRequestInterceptResult {
-                    request: Some(valid_llm_request_envelope()),
-                    annotated_request: None,
-                    has_annotated_request: true,
+                    outcome: Some(JsonEnvelope {
+                        schema: "nemo.relay.LegacyLlmRequestInterceptResult@1".into(),
+                        json: br#"{}"#.to_vec(),
+                    }),
                 })),
             },
             "llm_intercept_invalid_annotated" => InvokeResponse {
                 result: Some(InvokeResult::LlmRequest(LlmRequestInterceptResult {
-                    request: Some(valid_llm_request_envelope()),
-                    annotated_request: Some(JsonEnvelope {
-                        schema: ANNOTATED_LLM_REQUEST_SCHEMA.into(),
-                        json: b"null".to_vec(),
+                    outcome: Some(JsonEnvelope {
+                        schema: "nemo.relay.LlmRequestInterceptOutcome@1".into(),
+                        json: serde_json::to_vec(&json!({
+                            "request": valid_llm_request(),
+                            "annotated_request": 3,
+                            "pending_marks": [],
+                        }))
+                        .unwrap(),
                     }),
-                    has_annotated_request: true,
                 })),
             },
             "llm_intercept_error" => InvokeResponse {
@@ -454,7 +456,11 @@ async fn callback_helpers_cover_worker_response_edges() {
             None,
         )
         .expect_err("invalid LLM intercept request should fail");
-    assert!(error.to_string().contains("invalid LLM request"));
+    assert!(
+        error
+            .to_string()
+            .contains("invalid LLM request intercept outcome")
+    );
 
     let error = callback
         .invoke_llm_request_intercept(
@@ -463,11 +469,11 @@ async fn callback_helpers_cover_worker_response_edges() {
             valid_llm_request(),
             None,
         )
-        .expect_err("missing annotated request should fail when flagged present");
+        .expect_err("legacy outcome schema should fail");
     assert!(
         error
             .to_string()
-            .contains("llm request intercept annotated request is missing")
+            .contains("unsupported LLM request intercept outcome schema")
     );
 
     let error = callback
@@ -478,7 +484,11 @@ async fn callback_helpers_cover_worker_response_edges() {
             None,
         )
         .expect_err("invalid annotated request should fail");
-    assert!(error.to_string().contains("invalid annotated LLM request"));
+    assert!(
+        error
+            .to_string()
+            .contains("invalid LLM request intercept outcome")
+    );
 
     let error = callback
         .invoke_llm_request_intercept("llm_intercept_error", "model", valid_llm_request(), None)
@@ -1374,10 +1384,6 @@ fn valid_llm_request() -> LlmRequest {
         headers: serde_json::Map::new(),
         content: json!({ "prompt": "unit" }),
     }
-}
-
-fn valid_llm_request_envelope() -> JsonEnvelope {
-    json_envelope(LLM_REQUEST_SCHEMA, &valid_llm_request()).expect("llm request envelope")
 }
 
 async fn fake_callback_service(

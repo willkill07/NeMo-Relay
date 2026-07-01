@@ -1027,6 +1027,8 @@ impl NemoRelayContextState {
     /// - `annotated`: Optional normalized request annotation to carry through
     ///   the chain.
     /// - `entries`: Intercept snapshots to evaluate.
+    /// - `codec_active`: Whether request content is owned by the normalized
+    ///   annotation and must remain unchanged by callbacks.
     ///
     /// # Returns
     /// A [`Result`] containing the final request and annotation pair.
@@ -1042,19 +1044,38 @@ impl NemoRelayContextState {
         request: LlmRequest,
         annotated: Option<AnnotatedLlmRequest>,
         entries: &[Intercept<LlmRequestInterceptFn>],
-    ) -> crate::error::Result<(LlmRequest, Option<AnnotatedLlmRequest>)> {
+        codec_active: bool,
+    ) -> crate::error::Result<crate::api::llm::LlmRequestInterceptOutcome> {
         let mut request_value = request;
         let mut annotated_value = annotated;
+        let mut pending_marks = Vec::new();
         for entry in entries {
-            let (new_request, new_annotated) =
-                (entry.payload.callable)(name, request_value, annotated_value)?;
-            request_value = new_request;
-            annotated_value = new_annotated;
+            let input_content = request_value.content.clone();
+            let outcome = (entry.payload.callable)(name, request_value, annotated_value)?;
+            if codec_active && outcome.request.content != input_content {
+                return Err(crate::error::FlowError::InvalidArgument(format!(
+                    "LLM request intercept '{}' changed request.content while a request codec is active; modify annotated_request instead",
+                    entry.name
+                )));
+            }
+            if codec_active && outcome.annotated_request.is_none() {
+                return Err(crate::error::FlowError::InvalidArgument(format!(
+                    "LLM request intercept '{}' omitted annotated_request while a request codec is active",
+                    entry.name
+                )));
+            }
+            request_value = outcome.request;
+            annotated_value = outcome.annotated_request;
+            pending_marks.extend(outcome.pending_marks);
             if entry.payload.break_chain {
                 break;
             }
         }
-        Ok((request_value, annotated_value))
+        Ok(crate::api::llm::LlmRequestInterceptOutcome {
+            request: request_value,
+            annotated_request: annotated_value,
+            pending_marks,
+        })
     }
 
     /// Build the composed non-streaming LLM execution continuation chain.
@@ -1124,11 +1145,7 @@ impl NemoRelayContextState {
 
 fn end_timestamp_after(started_at: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     let now = Utc::now();
-    if now > started_at {
-        now
-    } else {
-        started_at + Duration::microseconds(1)
-    }
+    std::cmp::max(now, started_at + Duration::microseconds(1))
 }
 
 impl Default for NemoRelayContextState {
