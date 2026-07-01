@@ -360,6 +360,70 @@ async fn serve_listener_honors_plugin_idle_timeout_env() {
 }
 
 #[tokio::test]
+async fn serve_listener_flushes_shutdown_scope_events_without_plugins() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let subscriber_name = "server-shutdown-flush-without-plugins-test";
+    let _ = deregister_subscriber(subscriber_name);
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let captured_events = captured.clone();
+    register_subscriber(
+        subscriber_name,
+        Arc::new(move |event| {
+            if event.scope_category() == Some(ScopeCategory::End)
+                && event
+                    .metadata()
+                    .and_then(|metadata| metadata.get("session_id"))
+                    .and_then(Value::as_str)
+                    == Some("shutdown-flush-session")
+            {
+                captured_events
+                    .lock()
+                    .unwrap()
+                    .push(event.name().to_string());
+            }
+        }),
+    )
+    .unwrap();
+    let _subscriber_cleanup = SubscriberCleanup(subscriber_name);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let url = format!("http://{address}");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let handle =
+        tokio::spawn(
+            async move { serve_listener(listener, test_config(), Some(shutdown_rx)).await },
+        );
+
+    wait_for_gateway(&url).await;
+    let client = test_http_client();
+    for hook_event_name in ["sessionStart", "UserPromptSubmit"] {
+        let response = client
+            .post(format!("{url}/hooks/codex"))
+            .json(&json!({
+                "session_id": "shutdown-flush-session",
+                "hook_event_name": hook_event_name
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    shutdown_tx.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+
+    assert!(
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == "codex-turn"),
+        "expected shutdown scope-end event to be flushed"
+    );
+}
+
+#[tokio::test]
 async fn plugin_idle_timeout_parses_absent_invalid_zero_and_positive_values() {
     let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
 
