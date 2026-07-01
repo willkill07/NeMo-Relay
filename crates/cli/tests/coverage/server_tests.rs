@@ -197,6 +197,13 @@ fn startup_status_reports_bound_gateway_and_exporters() {
     assert!(output.contains("OpenTelemetry http://127.0.0.1:4318/v1/traces"));
 }
 
+#[test]
+fn startup_status_reports_not_configured_when_no_exporters() {
+    let output = render_startup_status("127.0.0.1:4567".parse().unwrap(), &test_config(), false);
+
+    assert!(output.contains("Exporters      not configured"));
+}
+
 fn write_missing_native_plugin_manifest(
     dir: &std::path::Path,
     plugin_id: &str,

@@ -558,23 +558,7 @@ impl PreparedRun {
         // Color decisions key off stderr (where we actually emit), not stdout.
         let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr())
             && std::env::var_os("NO_COLOR").is_none();
-        let max_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-        // 1-char padding on each side of the longest line.
-        let inner = max_w + 2;
-
-        eprintln!();
-        eprint_border_line('╭', '╮', inner, use_color);
-        for line in &lines {
-            let pad = max_w - line.chars().count();
-            let body = format!(" {line}{spaces} ", spaces = " ".repeat(pad));
-            if use_color {
-                eprintln!("\x1b[38;5;112m│\x1b[0m{body}\x1b[38;5;112m│\x1b[0m");
-            } else {
-                eprintln!("│{body}│");
-            }
-        }
-        eprint_border_line('╰', '╯', inner, use_color);
-        eprintln!();
+        eprint!("{}", render_status_frame(&lines, use_color));
     }
 
     // Prints the resolved transparent-run plan, including dynamic gateway URL, upstream base URLs,
@@ -611,6 +595,31 @@ impl PreparedRun {
             println!("note = {note}");
         }
     }
+}
+
+/// Renders a bordered status frame for daemon and transparent-run startup output.
+pub(crate) fn render_status_frame(lines: &[String], color: bool) -> String {
+    let max_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    // 1-char padding on each side of the longest line.
+    let inner = max_w + 2;
+    let mut output = String::new();
+
+    output.push('\n');
+    push_status_border(&mut output, '╭', '╮', inner, color);
+    for line in lines {
+        let pad = max_w - line.chars().count();
+        let body = format!(" {line}{spaces} ", spaces = " ".repeat(pad));
+        if color {
+            output.push_str(&format!(
+                "\x1b[38;5;112m│\x1b[0m{body}\x1b[38;5;112m│\x1b[0m\n"
+            ));
+        } else {
+            output.push_str(&format!("│{body}│\n"));
+        }
+    }
+    push_status_border(&mut output, '╰', '╯', inner, color);
+    output.push('\n');
+    output
 }
 
 pub(crate) fn exporter_destinations(config: &GatewayConfig) -> Vec<String> {
@@ -744,15 +753,20 @@ fn codex_gateway_provider_config(gateway_url: &str) -> String {
     )
 }
 
-// Prints one horizontal border line for the live-status frame in NVIDIA green when color is
-// enabled, otherwise plain ASCII-compatible box-drawing. Writes to stderr so the banner doesn't
-// contaminate piped/redirected agent stdout.
-fn eprint_border_line(left: char, right: char, inner_width: usize, color: bool) {
+// Appends one horizontal border line in NVIDIA green when color is enabled, otherwise plain
+// ASCII-compatible box-drawing.
+fn push_status_border(
+    output: &mut String,
+    left: char,
+    right: char,
+    inner_width: usize,
+    color: bool,
+) {
     let dashes = "─".repeat(inner_width);
     if color {
-        eprintln!("\x1b[38;5;112m{left}{dashes}{right}\x1b[0m");
+        output.push_str(&format!("\x1b[38;5;112m{left}{dashes}{right}\x1b[0m\n"));
     } else {
-        eprintln!("{left}{dashes}{right}");
+        output.push_str(&format!("{left}{dashes}{right}\n"));
     }
 }
 
