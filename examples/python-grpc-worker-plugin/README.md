@@ -44,3 +44,9 @@ environment.
 The SDK package owns the generated protobuf stubs and gRPC server setup. Relay
 starts the worker through the manifest entrypoint and supplies the worker
 socket, host socket, activation ID, and activation token environment variables.
+
+Async callbacks are cancelled cooperatively when the host caller times out or
+stops consuming a worker stream. Let `asyncio.CancelledError` propagate and put
+resource cleanup in `finally` blocks. Synchronous or blocking callback code
+cannot be preempted by the SDK; move that work off the event-loop thread and
+define its cancellation behavior explicitly.
