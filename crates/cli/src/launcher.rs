@@ -613,7 +613,7 @@ impl PreparedRun {
     }
 }
 
-fn exporter_destinations(config: &GatewayConfig) -> Vec<String> {
+pub(crate) fn exporter_destinations(config: &GatewayConfig) -> Vec<String> {
     let Some(plugin_config) = config.plugin_config.as_ref() else {
         return Vec::new();
     };

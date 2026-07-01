@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -67,6 +68,7 @@ pub(crate) async fn serve_with_dynamic(
             CliError::Io(err)
         }
     })?;
+    print_startup_status(listener.local_addr()?, &config);
     serve_listener_with_dynamic_inner(
         listener,
         config,
@@ -74,6 +76,74 @@ pub(crate) async fn serve_with_dynamic(
         Some(ShutdownMode::ProcessSignal),
     )
     .await
+}
+
+fn print_startup_status(bind: SocketAddr, config: &GatewayConfig) {
+    let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr())
+        && std::env::var_os("NO_COLOR").is_none();
+    eprint!("{}", render_startup_status(bind, config, use_color));
+}
+
+fn render_startup_status(bind: SocketAddr, config: &GatewayConfig, color: bool) -> String {
+    let mut lines = vec![
+        "NeMo Relay".to_string(),
+        format!("  Gateway        http://{bind}"),
+    ];
+    let destinations = crate::launcher::exporter_destinations(config);
+    if destinations.is_empty() {
+        lines.push("  Exporters      not configured".into());
+    } else {
+        for (index, destination) in destinations.iter().enumerate() {
+            lines.push(format!(
+                "  {}{}",
+                if index == 0 {
+                    "Exporters      "
+                } else {
+                    "               "
+                },
+                destination
+            ));
+        }
+    }
+
+    let max_width = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let inner_width = max_width + 2;
+    let mut output = String::new();
+    output.push('\n');
+    push_status_border(&mut output, '╭', '╮', inner_width, color);
+    for line in lines {
+        let padding = max_width - line.chars().count();
+        let body = format!(" {line}{} ", " ".repeat(padding));
+        if color {
+            output.push_str(&format!(
+                "\x1b[38;5;112m│\x1b[0m{body}\x1b[38;5;112m│\x1b[0m\n"
+            ));
+        } else {
+            output.push_str(&format!("│{body}│\n"));
+        }
+    }
+    push_status_border(&mut output, '╰', '╯', inner_width, color);
+    output.push('\n');
+    output
+}
+
+fn push_status_border(
+    output: &mut String,
+    left: char,
+    right: char,
+    inner_width: usize,
+    color: bool,
+) {
+    let dashes = "─".repeat(inner_width);
+    if color {
+        output.push_str(&format!("\x1b[38;5;112m{left}{dashes}{right}\x1b[0m\n"));
+    } else {
+        output.push_str(&format!("{left}{dashes}{right}\n"));
+    }
 }
 
 /// Serves the gateway router on a caller-owned listener with optional graceful shutdown.
