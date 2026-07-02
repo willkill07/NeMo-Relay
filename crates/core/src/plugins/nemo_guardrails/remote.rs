@@ -17,7 +17,6 @@ use crate::codec::traits::LlmCodec;
 use crate::error::FlowError;
 use crate::plugin::{PluginError, PluginRegistrationContext, Result as PluginResult};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use rustls::crypto::ring;
 
 use super::{NeMoGuardrailsConfig, RequestDefaultsConfig, RequestRailsConfig};
 
@@ -62,8 +61,6 @@ impl RemoteBackendRuntime {
             })?;
             default_headers.insert(header_name, header_value);
         }
-
-        let _ = ring::default_provider().install_default();
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
