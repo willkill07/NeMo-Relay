@@ -175,6 +175,9 @@ pub(super) fn write_or_merge(
         .parse()
         .map_err(|err| CliError::Config(format!("could not parse existing config: {err}")))?;
     let agent_key = agent_key_and_command(agent).0;
+    // Remove the legacy plugin configuration block so the merged config remains loadable after
+    // plugin configuration moved to plugins.toml.
+    existing.remove("plugins");
     merge_agents_entry(&mut existing, doc, agent_key);
     std::fs::write(path, existing.to_string())?;
     Ok(())

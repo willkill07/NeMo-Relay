@@ -454,6 +454,9 @@ fn write_or_merge_recovers_from_non_table_agents_value() {
         r#"
 agents = "not-a-table"
 
+[plugins]
+config = { version = 1, components = [] }
+
 "#,
     )
     .unwrap();
