@@ -29137,7 +29137,7 @@ THE SOFTWARE.
 
 ```
 
-## pyo3 - 0.28.3
+## pyo3 - 0.29.0
 **Repository URL**: https://github.com/pyo3/pyo3
 **License Type(s)**: Apache-2.0
 ### License: https://spdx.org/licenses/Apache-2.0.html
@@ -29218,7 +29218,7 @@ limitations under the License.
 
 ```
 
-## pyo3-async-runtimes - 0.28.0
+## pyo3-async-runtimes - 0.29.0
 **Repository URL**: https://github.com/PyO3/pyo3-async-runtimes
 **License Type(s)**: Apache-2.0
 ### License: https://spdx.org/licenses/Apache-2.0.html
@@ -29415,7 +29415,7 @@ limitations under the License.
 
 ```
 
-## pyo3-build-config - 0.28.3
+## pyo3-build-config - 0.29.0
 **Repository URL**: https://github.com/pyo3/pyo3
 **License Type(s)**: Apache-2.0
 ### License: https://spdx.org/licenses/Apache-2.0.html
@@ -29496,7 +29496,7 @@ limitations under the License.
 
 ```
 
-## pyo3-ffi - 0.28.3
+## pyo3-ffi - 0.29.0
 **Repository URL**: https://github.com/pyo3/pyo3
 **License Type(s)**: Apache-2.0
 ### License: https://spdx.org/licenses/Apache-2.0.html
@@ -29577,7 +29577,7 @@ limitations under the License.
 
 ```
 
-## pyo3-macros - 0.28.3
+## pyo3-macros - 0.29.0
 **Repository URL**: https://github.com/pyo3/pyo3
 **License Type(s)**: Apache-2.0
 ### License: https://spdx.org/licenses/Apache-2.0.html
@@ -29658,7 +29658,7 @@ limitations under the License.
 
 ```
 
-## pyo3-macros-backend - 0.28.3
+## pyo3-macros-backend - 0.29.0
 **Repository URL**: https://github.com/pyo3/pyo3
 **License Type(s)**: Apache-2.0
 ### License: https://spdx.org/licenses/Apache-2.0.html
@@ -29739,7 +29739,7 @@ limitations under the License.
 
 ```
 
-## pythonize - 0.28.0
+## pythonize - 0.29.0
 **Repository URL**: https://github.com/davidhewitt/pythonize
 **License Type(s)**: MIT
 ### License: https://spdx.org/licenses/MIT.html
