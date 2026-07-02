@@ -10,6 +10,7 @@ use std::io::Read;
 use std::path::Path;
 
 use jsonschema::{Draft, Validator};
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use serde_json::{Map, Value};
 
 use crate::error::CliError;
@@ -21,6 +22,13 @@ const DRAFT_2020_12_HTTP_URI: &str = "http://json-schema.org/draft/2020-12/schem
 const REDACTED: &str = "<redacted>";
 const EDIT_REDACTED_PREFIX: &str = "<redacted:nemo-relay:";
 const MAX_CONFIG_SCHEMA_BYTES: u64 = 1024 * 1024;
+const URI_FRAGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'%');
 
 pub(super) type SecretEditValues = BTreeMap<String, SecretEditValue>;
 
@@ -96,7 +104,7 @@ impl PluginConfigSchema {
         let plugin_id = plugin_id.into();
         let path = path.as_ref().to_path_buf();
         let contents = read_schema_file(&plugin_id, &path)?;
-        let source: Value = serde_json::from_slice(&contents).map_err(|error| {
+        let mut source: Value = serde_json::from_slice(&contents).map_err(|error| {
             schema_error(
                 &plugin_id,
                 &path,
@@ -105,7 +113,8 @@ impl PluginConfigSchema {
         })?;
 
         let draft = parse_draft(&plugin_id, &path, &source)?;
-        reject_external_references(&plugin_id, &path, &source)?;
+        normalize_local_references(&plugin_id, &path, &mut source)?;
+        validate_schema_security(&plugin_id, &path, &source)?;
         validate_schema_document(&plugin_id, &path, draft, &source)?;
         let validator = jsonschema::options()
             .with_draft(draft.validator_draft())
@@ -175,8 +184,9 @@ impl PluginConfigSchema {
     pub(super) fn validate(&self, config: &Value) -> Result<(), CliError> {
         self.validator.validate(config).map_err(|error| {
             let pointer = error.instance_path().to_string();
+            let masked = error.masked_with(REDACTED);
             CliError::Config(format!(
-                "dynamic plugin '{}' configuration at JSON pointer '{}' is invalid: {error}",
+                "dynamic plugin '{}' configuration at JSON pointer '{}' is invalid: {masked}",
                 self.plugin_id, pointer
             ))
         })
@@ -327,16 +337,133 @@ fn parse_draft(
     }
 }
 
-fn reject_external_references(
+fn normalize_local_references(
     plugin_id: &str,
     path: &Path,
-    schema: &Value,
+    schema: &mut Value,
 ) -> Result<(), CliError> {
     fn visit_schema(
         plugin_id: &str,
         file_path: &Path,
+        schema: &mut Value,
+        pointer: &str,
+    ) -> Result<(), CliError> {
+        let Some(object) = schema.as_object_mut() else {
+            return Ok(());
+        };
+        if let Some(Value::String(reference)) = object.get_mut("$ref")
+            && reference.starts_with('#')
+        {
+            *reference = canonicalize_local_reference(reference).map_err(|error| {
+                schema_error(
+                    plugin_id,
+                    file_path,
+                    format!(
+                        "invalid local $ref at JSON pointer '{}': {error}",
+                        push_pointer(pointer, "$ref")
+                    ),
+                )
+            })?;
+        }
+
+        for key in [
+            "additionalItems",
+            "additionalProperties",
+            "contains",
+            "contentSchema",
+            "else",
+            "if",
+            "not",
+            "propertyNames",
+            "then",
+            "unevaluatedItems",
+            "unevaluatedProperties",
+        ] {
+            if let Some(child) = object.get_mut(key) {
+                visit_schema(plugin_id, file_path, child, &push_pointer(pointer, key))?;
+            }
+        }
+
+        if let Some(items) = object.get_mut("items") {
+            let items_pointer = push_pointer(pointer, "items");
+            if let Some(items) = items.as_array_mut() {
+                for (index, child) in items.iter_mut().enumerate() {
+                    visit_schema(
+                        plugin_id,
+                        file_path,
+                        child,
+                        &push_pointer(&items_pointer, &index.to_string()),
+                    )?;
+                }
+            } else {
+                visit_schema(plugin_id, file_path, items, &items_pointer)?;
+            }
+        }
+
+        for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+            if let Some(children) = object.get_mut(key).and_then(Value::as_array_mut) {
+                let children_pointer = push_pointer(pointer, key);
+                for (index, child) in children.iter_mut().enumerate() {
+                    visit_schema(
+                        plugin_id,
+                        file_path,
+                        child,
+                        &push_pointer(&children_pointer, &index.to_string()),
+                    )?;
+                }
+            }
+        }
+
+        for key in [
+            "$defs",
+            "definitions",
+            "dependentSchemas",
+            "patternProperties",
+            "properties",
+        ] {
+            if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {
+                let children_pointer = push_pointer(pointer, key);
+                for (name, child) in children {
+                    visit_schema(
+                        plugin_id,
+                        file_path,
+                        child,
+                        &push_pointer(&children_pointer, name),
+                    )?;
+                }
+            }
+        }
+
+        if let Some(dependencies) = object
+            .get_mut("dependencies")
+            .and_then(Value::as_object_mut)
+        {
+            let dependencies_pointer = push_pointer(pointer, "dependencies");
+            for (name, dependency) in dependencies {
+                if dependency.is_object() || dependency.is_boolean() {
+                    visit_schema(
+                        plugin_id,
+                        file_path,
+                        dependency,
+                        &push_pointer(&dependencies_pointer, name),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    visit_schema(plugin_id, path, schema, "")
+}
+
+fn validate_schema_security(plugin_id: &str, path: &Path, schema: &Value) -> Result<(), CliError> {
+    fn visit_schema(
+        plugin_id: &str,
+        file_path: &Path,
+        root: &Value,
         schema: &Value,
         pointer: &str,
+        unsupported_secret_context: Option<&str>,
     ) -> Result<(), CliError> {
         let Some(object) = schema.as_object() else {
             return Ok(());
@@ -367,11 +494,54 @@ fn reject_external_references(
                 ),
             ));
         }
+        if object.get("writeOnly").and_then(Value::as_bool) == Some(true) {
+            if let Some(keyword) = unsupported_secret_context {
+                return Err(schema_error(
+                    plugin_id,
+                    file_path,
+                    format!(
+                        "writeOnly at JSON pointer '{}' is not supported under '{keyword}'",
+                        push_pointer(pointer, "writeOnly")
+                    ),
+                ));
+            }
+            let mut references = HashSet::new();
+            let mut reference_chain = Vec::new();
+            resolve_schema_chain(root, schema, &mut references, &mut reference_chain).map_err(
+                |error| {
+                    schema_error(
+                        plugin_id,
+                        file_path,
+                        format!(
+                            "writeOnly schema at JSON pointer '{}' cannot be resolved: {error}",
+                            pointer
+                        ),
+                    )
+                },
+            )?;
+            classify_write_only_chain(&reference_chain).map_err(|error| {
+                schema_error(
+                    plugin_id,
+                    file_path,
+                    format!("unsupported writeOnly shape at JSON pointer '{pointer}': {error}"),
+                )
+            })?;
+        }
+
+        for key in ["additionalItems", "additionalProperties", "contains"] {
+            if let Some(child) = object.get(key) {
+                visit_schema(
+                    plugin_id,
+                    file_path,
+                    root,
+                    child,
+                    &push_pointer(pointer, key),
+                    unsupported_secret_context,
+                )?;
+            }
+        }
 
         for key in [
-            "additionalItems",
-            "additionalProperties",
-            "contains",
             "contentSchema",
             "else",
             "if",
@@ -382,7 +552,14 @@ fn reject_external_references(
             "unevaluatedProperties",
         ] {
             if let Some(child) = object.get(key) {
-                visit_schema(plugin_id, file_path, child, &push_pointer(pointer, key))?;
+                visit_schema(
+                    plugin_id,
+                    file_path,
+                    root,
+                    child,
+                    &push_pointer(pointer, key),
+                    unsupported_secret_context.or(Some(key)),
+                )?;
             }
         }
 
@@ -393,46 +570,71 @@ fn reject_external_references(
                     visit_schema(
                         plugin_id,
                         file_path,
+                        root,
                         child,
                         &push_pointer(&items_pointer, &index.to_string()),
+                        unsupported_secret_context,
                     )?;
                 }
             } else {
-                visit_schema(plugin_id, file_path, items, &items_pointer)?;
+                visit_schema(
+                    plugin_id,
+                    file_path,
+                    root,
+                    items,
+                    &items_pointer,
+                    unsupported_secret_context,
+                )?;
             }
         }
 
         for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
             if let Some(children) = object.get(key).and_then(Value::as_array) {
                 let children_pointer = push_pointer(pointer, key);
+                let child_context = match key {
+                    "anyOf" | "oneOf" => unsupported_secret_context.or(Some(key)),
+                    _ => unsupported_secret_context,
+                };
                 for (index, child) in children.iter().enumerate() {
                     visit_schema(
                         plugin_id,
                         file_path,
+                        root,
                         child,
                         &push_pointer(&children_pointer, &index.to_string()),
+                        child_context,
                     )?;
                 }
             }
         }
 
-        for key in [
-            "$defs",
-            "definitions",
-            "dependentSchemas",
-            "patternProperties",
-            "properties",
-        ] {
+        for key in ["$defs", "definitions", "patternProperties", "properties"] {
             if let Some(children) = object.get(key).and_then(Value::as_object) {
                 let children_pointer = push_pointer(pointer, key);
                 for (name, child) in children {
                     visit_schema(
                         plugin_id,
                         file_path,
+                        root,
                         child,
                         &push_pointer(&children_pointer, name),
+                        unsupported_secret_context,
                     )?;
                 }
+            }
+        }
+
+        if let Some(children) = object.get("dependentSchemas").and_then(Value::as_object) {
+            let children_pointer = push_pointer(pointer, "dependentSchemas");
+            for (name, child) in children {
+                visit_schema(
+                    plugin_id,
+                    file_path,
+                    root,
+                    child,
+                    &push_pointer(&children_pointer, name),
+                    unsupported_secret_context.or(Some("dependentSchemas")),
+                )?;
             }
         }
 
@@ -443,8 +645,10 @@ fn reject_external_references(
                     visit_schema(
                         plugin_id,
                         file_path,
+                        root,
                         dependency,
                         &push_pointer(&dependencies_pointer, name),
+                        unsupported_secret_context.or(Some("dependencies")),
                     )?;
                 }
             }
@@ -452,7 +656,7 @@ fn reject_external_references(
         Ok(())
     }
 
-    visit_schema(plugin_id, path, schema, "")
+    visit_schema(plugin_id, path, schema, schema, "", None)
 }
 
 fn validate_schema_document(
@@ -588,7 +792,8 @@ fn build_field(
     reference_stack: &HashSet<String>,
 ) -> Result<DynamicConfigField, CliError> {
     let mut references = reference_stack.clone();
-    let resolved = match resolve_schema(root, schema, &mut references) {
+    let mut reference_chain = Vec::new();
+    let resolved = match resolve_schema_chain(root, schema, &mut references, &mut reference_chain) {
         Ok(schema) => schema,
         Err(ResolveError::Cycle(_)) => {
             return Ok(DynamicConfigField {
@@ -614,7 +819,13 @@ fn build_field(
         .get("default")
         .or_else(|| resolved.get("default"))
         .cloned();
-    let secret = annotation_bool(schema, resolved, "writeOnly");
+    let secret = classify_write_only_chain(&reference_chain).map_err(|error| {
+        schema_error(
+            plugin_id,
+            path,
+            format!("property '{key}' has an unsupported writeOnly shape: {error}"),
+        )
+    })?;
     let kind = build_field_kind(plugin_id, path, root, resolved, secret, &references)?;
 
     Ok(DynamicConfigField {
@@ -719,18 +930,49 @@ fn annotation_string(primary: &Value, resolved: &Value, key: &str) -> Option<Str
         .map(ToOwned::to_owned)
 }
 
-fn annotation_bool(primary: &Value, resolved: &Value, key: &str) -> bool {
-    primary
-        .get(key)
-        .or_else(|| resolved.get(key))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+fn classify_write_only_chain(reference_chain: &[&Value]) -> Result<bool, String> {
+    if !reference_chain
+        .iter()
+        .any(|schema| schema.get("writeOnly").and_then(Value::as_bool) == Some(true))
+    {
+        return Ok(false);
+    }
+    if reference_chain
+        .iter()
+        .any(|schema| supports_string_secret(schema))
+    {
+        return Ok(true);
+    }
+    Err(
+        "writeOnly must resolve directly or through local $ref values to type 'string' or \
+         ['string', 'null']; annotations split across applicators are not supported"
+            .to_owned(),
+    )
+}
+
+fn supports_string_secret(schema: &Value) -> bool {
+    match schema.get("type") {
+        Some(Value::String(kind)) => kind == "string",
+        Some(Value::Array(kinds)) => {
+            let mut has_string = false;
+            for kind in kinds {
+                match kind.as_str() {
+                    Some("string") => has_string = true,
+                    Some("null") => {}
+                    _ => return false,
+                }
+            }
+            has_string
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
 enum ResolveError {
     Missing(String),
     Cycle(String),
+    InvalidFragment { reference: String, reason: String },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -740,6 +982,12 @@ impl std::fmt::Display for ResolveError {
                 write!(formatter, "local reference '{reference}' was not found")
             }
             Self::Cycle(reference) => write!(formatter, "local reference '{reference}' is cyclic"),
+            Self::InvalidFragment { reference, reason } => {
+                write!(
+                    formatter,
+                    "local reference '{reference}' has an invalid fragment: {reason}"
+                )
+            }
         }
     }
 }
@@ -749,28 +997,80 @@ fn resolve_schema<'a>(
     schema: &'a Value,
     references: &mut HashSet<String>,
 ) -> Result<&'a Value, ResolveError> {
+    let mut reference_chain = Vec::new();
+    resolve_schema_chain(root, schema, references, &mut reference_chain)
+}
+
+fn resolve_schema_chain<'a>(
+    root: &'a Value,
+    schema: &'a Value,
+    references: &mut HashSet<String>,
+    reference_chain: &mut Vec<&'a Value>,
+) -> Result<&'a Value, ResolveError> {
+    reference_chain.push(schema);
     let Some(reference) = schema.get("$ref").and_then(Value::as_str) else {
         return Ok(schema);
     };
-    if !references.insert(reference.to_owned()) {
-        return Err(ResolveError::Cycle(reference.to_owned()));
+    let fragment = decode_reference_fragment(reference)?;
+    let canonical_reference = format!("#{fragment}");
+    if !references.insert(canonical_reference.clone()) {
+        return Err(ResolveError::Cycle(canonical_reference));
     }
-    let target = resolve_fragment(root, reference)
+    let target = resolve_fragment(root, &fragment)
         .ok_or_else(|| ResolveError::Missing(reference.to_owned()))?;
-    resolve_schema(root, target, references)
+    resolve_schema_chain(root, target, references, reference_chain)
 }
 
-fn resolve_fragment<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
-    if reference == "#" {
+fn decode_reference_fragment(reference: &str) -> Result<String, ResolveError> {
+    let Some(fragment) = reference.strip_prefix('#') else {
+        return Err(ResolveError::InvalidFragment {
+            reference: reference.to_owned(),
+            reason: "reference must begin with '#'".to_owned(),
+        });
+    };
+    let bytes = fragment.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return Err(ResolveError::InvalidFragment {
+                    reference: reference.to_owned(),
+                    reason: "percent escapes must contain two hexadecimal digits".to_owned(),
+                });
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    percent_decode_str(fragment)
+        .decode_utf8()
+        .map(|decoded| decoded.into_owned())
+        .map_err(|error| ResolveError::InvalidFragment {
+            reference: reference.to_owned(),
+            reason: format!("decoded fragment is not UTF-8: {error}"),
+        })
+}
+
+fn canonicalize_local_reference(reference: &str) -> Result<String, ResolveError> {
+    let fragment = decode_reference_fragment(reference)?;
+    Ok(format!(
+        "#{}",
+        utf8_percent_encode(&fragment, URI_FRAGMENT_ENCODE_SET)
+    ))
+}
+
+fn resolve_fragment<'a>(root: &'a Value, fragment: &str) -> Option<&'a Value> {
+    if fragment.is_empty() {
         return Some(root);
     }
-    if let Some(pointer) = reference.strip_prefix('#')
-        && pointer.starts_with('/')
-    {
-        return root.pointer(pointer);
+    if fragment.starts_with('/') {
+        return root.pointer(fragment);
     }
-    let anchor = reference.strip_prefix('#')?;
-    find_anchor(root, anchor)
+    find_anchor(root, fragment)
 }
 
 fn find_anchor<'a>(schema: &'a Value, anchor: &str) -> Option<&'a Value> {
@@ -1128,7 +1428,8 @@ fn discover_secret_patterns(
     output: &mut Vec<SecretPattern>,
 ) -> Result<(), String> {
     let mut references = reference_stack.clone();
-    let resolved = match resolve_schema(root, schema, &mut references) {
+    let mut reference_chain = Vec::new();
+    let resolved = match resolve_schema_chain(root, schema, &mut references, &mut reference_chain) {
         Ok(resolved) => resolved,
         Err(error) => {
             return Err(format!(
@@ -1136,7 +1437,7 @@ fn discover_secret_patterns(
             ));
         }
     };
-    if schema_type(resolved) == Some("string") && annotation_bool(schema, resolved, "writeOnly") {
+    if classify_write_only_chain(&reference_chain)? {
         output.push(SecretPattern(instance_path.to_vec()));
         return Ok(());
     }
@@ -1227,10 +1528,21 @@ fn discover_secret_patterns(
             discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
         }
     }
-    for keyword in ["allOf", "anyOf", "oneOf"] {
+    if let Some(branches) = object.get("allOf").and_then(Value::as_array) {
+        for branch in branches {
+            discover_secret_patterns(root, branch, instance_path, &references, output)?;
+        }
+    }
+    for keyword in ["anyOf", "oneOf"] {
         if let Some(branches) = object.get(keyword).and_then(Value::as_array) {
             for branch in branches {
-                discover_secret_patterns(root, branch, instance_path, &references, output)?;
+                reject_write_only_under_applicator(
+                    root,
+                    keyword,
+                    branch,
+                    instance_path,
+                    &references,
+                )?;
             }
         }
     }
@@ -1238,7 +1550,7 @@ fn discover_secret_patterns(
         if let Some(branch) = object.get(keyword)
             && branch.is_object()
         {
-            discover_secret_patterns(root, branch, instance_path, &references, output)?;
+            reject_write_only_under_applicator(root, keyword, branch, instance_path, &references)?;
         }
     }
     if let Some(contains) = object.get("contains")

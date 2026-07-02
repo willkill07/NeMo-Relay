@@ -1539,6 +1539,7 @@ dependencies = [
  "nemo-relay-pii-redaction",
  "opentelemetry",
  "opentelemetry_sdk",
+ "percent-encoding",
  "regex",
  "reqwest",
  "ring",

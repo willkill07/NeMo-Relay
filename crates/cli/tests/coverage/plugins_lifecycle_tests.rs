@@ -1434,9 +1434,11 @@ fn add_rejects_scope_flags_when_explicit_config_is_set() {
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::create_dir_all(&config_dir).unwrap();
     write_dynamic_manifest(&plugin_dir, "acme.explicit-conflict");
+    let config_path = config_dir.join("gateway.toml");
+    std::fs::write(&config_path, "").unwrap();
 
     let server = ServerArgs {
-        config: Some(config_dir.join("gateway.toml")),
+        config: Some(config_path),
         ..ServerArgs::default()
     };
 
@@ -1806,9 +1808,11 @@ fn add_with_explicit_config_uses_sibling_plugins_and_state_files() {
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::create_dir_all(&config_dir).unwrap();
     write_dynamic_manifest(&plugin_dir, "acme.explicit");
+    let config_path = config_dir.join("gateway.toml");
+    std::fs::write(&config_path, "").unwrap();
 
     let server = ServerArgs {
-        config: Some(config_dir.join("gateway.toml")),
+        config: Some(config_path),
         ..ServerArgs::default()
     };
 

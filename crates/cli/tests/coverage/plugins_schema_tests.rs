@@ -166,6 +166,58 @@ fn resolves_local_definitions_for_root_and_fields() {
 }
 
 #[test]
+fn resolves_percent_encoded_local_references() {
+    let loaded = load(&json!({
+        "$schema": DRAFT2020,
+        "$ref": "#%2F$defs%2Fconfig",
+        "$defs": {
+            "config": {
+                "type": "object",
+                "properties": {
+                    "anchored": {"$ref": "#secret%2Danchor"},
+                    "slash": {"$ref": "#/$defs/a%7E1b"},
+                    "space": {"$ref": "#/$defs/a%20b"}
+                }
+            },
+            "a b": {"type": "string"},
+            "a/b": {"type": "string"},
+            "anchored": {"$anchor": "secret-anchor", "type": "string"}
+        }
+    }));
+
+    assert_eq!(loaded.fields().len(), 3);
+    assert!(
+        loaded
+            .fields()
+            .iter()
+            .all(|field| matches!(field.kind, DynamicConfigFieldKind::String { secret: false }))
+    );
+}
+
+#[test]
+fn canonicalizes_reference_fragments_and_rejects_malformed_encoding() {
+    let schema = json!({
+        "$schema": DRAFT2020,
+        "type": "object",
+        "properties": {
+            "cycle": {"$ref": "#/$defs/a b"}
+        },
+        "$defs": {
+            "a b": {"$ref": "#/$defs/a%20b"}
+        }
+    });
+    let mut references = HashSet::new();
+    let error = resolve_schema(&schema, &schema["properties"]["cycle"], &mut references)
+        .expect_err("encoded and decoded references identify the same cycle");
+    assert!(error.to_string().contains("cyclic"));
+
+    for reference in ["#/$defs/bad%2", "#/$defs/bad%GG", "#/$defs/bad%FF"] {
+        let error = decode_reference_fragment(reference).expect_err("reject malformed fragment");
+        assert!(error.to_string().contains("invalid fragment"));
+    }
+}
+
+#[test]
 fn maps_native_nested_map_and_raw_controls() {
     let loaded = load(&json!({
         "$schema": DRAFT2020,
@@ -300,6 +352,29 @@ fn validation_error_names_plugin_and_instance_pointer() {
 }
 
 #[test]
+fn validation_errors_mask_secret_instance_values() {
+    let loaded = load(&json!({
+        "$schema": DRAFT2020,
+        "type": "object",
+        "properties": {
+            "token": {
+                "type": "string",
+                "writeOnly": true,
+                "pattern": "^allowed$"
+            }
+        }
+    }));
+    let error = loaded
+        .validate(&json!({"token": "do-not-print-this-secret"}))
+        .expect_err("reject invalid secret");
+    let message = error.to_string();
+
+    assert!(message.contains("/token"), "{message}");
+    assert!(message.contains(REDACTED), "{message}");
+    assert!(!message.contains("do-not-print-this-secret"), "{message}");
+}
+
+#[test]
 fn recursively_discovers_and_redacts_write_only_strings() {
     let loaded = load(&json!({
         "$schema": DRAFT2020,
@@ -384,6 +459,86 @@ fn recursively_discovers_and_redacts_write_only_strings() {
         .restore_edit_secrets(&duplicated, &secrets)
         .expect_err("reject duplicate secret token");
     assert!(error.to_string().contains("may only appear once"));
+}
+
+#[test]
+fn discovers_write_only_across_reference_chains_and_nullable_strings() {
+    let loaded = load(&json!({
+        "$schema": DRAFT2020,
+        "type": "object",
+        "properties": {
+            "nullable": {"type": ["string", "null"], "writeOnly": true},
+            "token": {"$ref": "#/$defs/annotated"}
+        },
+        "$defs": {
+            "annotated": {"$ref": "#/$defs/string", "writeOnly": true},
+            "string": {"type": "string"}
+        }
+    }));
+
+    assert_eq!(
+        secret_paths(&loaded),
+        vec!["/nullable".to_owned(), "/token".to_owned()]
+    );
+    assert!(matches!(
+        loaded
+            .fields()
+            .iter()
+            .find(|field| field.key == "token")
+            .unwrap()
+            .kind,
+        DynamicConfigFieldKind::String { secret: true }
+    ));
+    assert_eq!(
+        loaded.redact(&json!({"nullable": "hidden", "token": "also-hidden"})),
+        json!({"nullable": REDACTED, "token": REDACTED})
+    );
+    assert_eq!(
+        loaded.redact(&json!({"nullable": null, "token": "hidden"})),
+        json!({"nullable": null, "token": REDACTED})
+    );
+}
+
+#[test]
+fn rejects_split_and_ambiguous_write_only_applicators() {
+    let (_directory, path) = write_schema(&json!({
+        "$schema": DRAFT2020,
+        "type": "object",
+        "properties": {
+            "token": {
+                "allOf": [
+                    {"type": "string"},
+                    {"writeOnly": true}
+                ]
+            }
+        }
+    }));
+    let error = PluginConfigSchema::load("acme.split", path)
+        .expect_err("reject writeOnly annotation split across allOf");
+    let message = error.to_string();
+    assert!(message.contains("unsupported writeOnly shape"), "{message}");
+    assert!(message.contains("/properties/token/allOf/1"), "{message}");
+
+    let (_directory, path) = write_schema(&json!({
+        "$schema": DRAFT2020,
+        "type": "object",
+        "properties": {
+            "token": {
+                "anyOf": [
+                    {"$ref": "#/$defs/secret"},
+                    {"type": "null"}
+                ]
+            }
+        },
+        "$defs": {
+            "secret": {"type": "string", "writeOnly": true}
+        }
+    }));
+    let error = PluginConfigSchema::load("acme.ambiguous", path)
+        .expect_err("reject conditional writeOnly annotation");
+    let message = error.to_string();
+    assert!(message.contains("anyOf"), "{message}");
+    assert!(message.contains("writeOnly"), "{message}");
 }
 
 #[test]
