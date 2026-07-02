@@ -1148,7 +1148,11 @@ struct SecretPattern(Vec<SecretSegment>);
 impl SecretPattern {
     fn redact(&self, value: &mut Value, offset: usize) {
         if offset == self.0.len() {
-            if value.is_string() {
+            // A configuration can contain a schema-invalid value before validation. Once the
+            // schema marks this path as secret, its runtime type must not determine whether it
+            // is safe to display. Null remains visible because it represents an unset nullable
+            // secret and carries no payload.
+            if !value.is_null() {
                 *value = Value::String(REDACTED.to_owned());
             }
             return;
@@ -1214,7 +1218,9 @@ impl SecretPattern {
         next_token: &mut usize,
     ) {
         if offset == self.0.len() {
-            if !value.is_string() {
+            // Tokenize invalid values too, both to keep raw editing safe and to preserve the
+            // original value if the user leaves it unchanged.
+            if value.is_null() {
                 return;
             }
             if value
@@ -1429,28 +1435,37 @@ fn discover_secret_patterns(
 ) -> Result<(), String> {
     let mut references = reference_stack.clone();
     let mut reference_chain = Vec::new();
-    let resolved = match resolve_schema_chain(root, schema, &mut references, &mut reference_chain) {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            return Err(format!(
-                "secret schema reference could not be resolved: {error}"
-            ));
-        }
-    };
+    resolve_schema_chain(root, schema, &mut references, &mut reference_chain)
+        .map_err(|error| format!("secret schema reference could not be resolved: {error}"))?;
     if classify_write_only_chain(&reference_chain)? {
         output.push(SecretPattern(instance_path.to_vec()));
         return Ok(());
     }
-    let Some(object) = resolved.as_object() else {
-        return Ok(());
-    };
 
+    // Draft 2020-12 treats `$ref` as an applicator, so sibling keywords remain active. Walk
+    // every node recorded during resolution instead of only the final target; otherwise a
+    // sibling `properties` subtree can contain writeOnly fields that never get redacted.
+    for effective_schema in reference_chain {
+        if let Some(object) = effective_schema.as_object() {
+            discover_secret_patterns_in_object(root, object, instance_path, &references, output)?;
+        }
+    }
+    Ok(())
+}
+
+fn discover_secret_patterns_in_object(
+    root: &Value,
+    object: &Map<String, Value>,
+    instance_path: &[SecretSegment],
+    references: &HashSet<String>,
+    output: &mut Vec<SecretPattern>,
+) -> Result<(), String> {
     let properties = object.get("properties").and_then(Value::as_object);
     if let Some(properties) = properties {
         for (property, child_schema) in properties {
             let mut child_path = instance_path.to_vec();
             child_path.push(SecretSegment::Property(property.clone()));
-            discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
+            discover_secret_patterns(root, child_schema, &child_path, references, output)?;
         }
     }
 
@@ -1489,12 +1504,12 @@ fn discover_secret_patterns(
                     .collect(),
             },
         ));
-        discover_secret_patterns(root, additional, &child_path, &references, output)?;
+        discover_secret_patterns(root, additional, &child_path, references, output)?;
     }
     for (pattern, child_schema) in pattern_schemas {
         let mut child_path = instance_path.to_vec();
         child_path.push(SecretSegment::Pattern(pattern));
-        discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
+        discover_secret_patterns(root, child_schema, &child_path, references, output)?;
     }
     if let Some(items) = object.get("items") {
         if items.is_object() {
@@ -1505,19 +1520,19 @@ fn discover_secret_patterns(
                 }
                 None => child_path.push(SecretSegment::Any),
             }
-            discover_secret_patterns(root, items, &child_path, &references, output)?;
+            discover_secret_patterns(root, items, &child_path, references, output)?;
         } else if let Some(tuple_items) = items.as_array() {
             for (index, child_schema) in tuple_items.iter().enumerate() {
                 let mut child_path = instance_path.to_vec();
                 child_path.push(SecretSegment::Index(index));
-                discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
+                discover_secret_patterns(root, child_schema, &child_path, references, output)?;
             }
             if let Some(additional_items) = object.get("additionalItems")
                 && additional_items.is_object()
             {
                 let mut child_path = instance_path.to_vec();
                 child_path.push(SecretSegment::Tail(tuple_items.len()));
-                discover_secret_patterns(root, additional_items, &child_path, &references, output)?;
+                discover_secret_patterns(root, additional_items, &child_path, references, output)?;
             }
         }
     }
@@ -1525,12 +1540,12 @@ fn discover_secret_patterns(
         for (index, child_schema) in prefix_items.iter().enumerate() {
             let mut child_path = instance_path.to_vec();
             child_path.push(SecretSegment::Index(index));
-            discover_secret_patterns(root, child_schema, &child_path, &references, output)?;
+            discover_secret_patterns(root, child_schema, &child_path, references, output)?;
         }
     }
     if let Some(branches) = object.get("allOf").and_then(Value::as_array) {
         for branch in branches {
-            discover_secret_patterns(root, branch, instance_path, &references, output)?;
+            discover_secret_patterns(root, branch, instance_path, references, output)?;
         }
     }
     for keyword in ["anyOf", "oneOf"] {
@@ -1541,7 +1556,7 @@ fn discover_secret_patterns(
                     keyword,
                     branch,
                     instance_path,
-                    &references,
+                    references,
                 )?;
             }
         }
@@ -1550,7 +1565,7 @@ fn discover_secret_patterns(
         if let Some(branch) = object.get(keyword)
             && branch.is_object()
         {
-            reject_write_only_under_applicator(root, keyword, branch, instance_path, &references)?;
+            reject_write_only_under_applicator(root, keyword, branch, instance_path, references)?;
         }
     }
     if let Some(contains) = object.get("contains")
@@ -1558,13 +1573,13 @@ fn discover_secret_patterns(
     {
         let mut child_path = instance_path.to_vec();
         child_path.push(SecretSegment::Any);
-        discover_secret_patterns(root, contains, &child_path, &references, output)?;
+        discover_secret_patterns(root, contains, &child_path, references, output)?;
     }
     for keyword in ["unevaluatedProperties", "unevaluatedItems"] {
         if let Some(branch) = object.get(keyword)
             && branch.is_object()
         {
-            reject_write_only_under_applicator(root, keyword, branch, instance_path, &references)?;
+            reject_write_only_under_applicator(root, keyword, branch, instance_path, references)?;
         }
     }
     for keyword in ["dependentSchemas", "dependencies"] {
@@ -1575,7 +1590,7 @@ fn discover_secret_patterns(
                     keyword,
                     branch,
                     instance_path,
-                    &references,
+                    references,
                 )?;
             }
         }

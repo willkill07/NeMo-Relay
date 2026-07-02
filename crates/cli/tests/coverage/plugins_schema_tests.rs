@@ -462,6 +462,54 @@ fn recursively_discovers_and_redacts_write_only_strings() {
 }
 
 #[test]
+fn discovers_write_only_fields_in_ref_sibling_subschemas() {
+    let loaded = load(&json!({
+        "$schema": DRAFT2020,
+        "type": "object",
+        "$defs": {
+            "base": {"type": "object"}
+        },
+        "properties": {
+            "auth": {
+                "$ref": "#/$defs/base",
+                "properties": {
+                    "password": {"type": "string", "writeOnly": true}
+                }
+            }
+        }
+    }));
+
+    assert_eq!(secret_paths(&loaded), vec!["/auth/password".to_owned()]);
+    assert_eq!(
+        loaded.redact(&json!({"auth": {"password": "hidden"}})),
+        json!({"auth": {"password": REDACTED}})
+    );
+}
+
+#[test]
+fn redacts_invalid_non_string_values_at_secret_paths() {
+    let loaded = load(&json!({
+        "$schema": DRAFT2020,
+        "type": "object",
+        "properties": {
+            "token": {"type": "string", "writeOnly": true}
+        }
+    }));
+    let config = json!({"token": {"nested": "must-not-leak"}});
+
+    assert_eq!(loaded.redact(&config), json!({"token": REDACTED}));
+
+    let (redacted, secrets) = loaded.redact_for_edit(&config);
+    assert_ne!(redacted["token"], config["token"]);
+    assert_eq!(
+        loaded
+            .restore_edit_secrets(&redacted, &secrets)
+            .expect("restore invalid secret value without exposing it"),
+        config
+    );
+}
+
+#[test]
 fn discovers_write_only_across_reference_chains_and_nullable_strings() {
     let loaded = load(&json!({
         "$schema": DRAFT2020,
@@ -576,7 +624,7 @@ fn secret_discovery_preserves_pattern_prefix_and_contains_selectors() {
         json!({
             "patterned": {"secret_token": REDACTED, "public": "show"},
             "tuple": [REDACTED, "show"],
-            "contained": [REDACTED, 7, REDACTED]
+            "contained": [REDACTED, REDACTED, REDACTED]
         })
     );
     assert!(loaded.has_secrets_at(&["patterned".to_owned()]));
