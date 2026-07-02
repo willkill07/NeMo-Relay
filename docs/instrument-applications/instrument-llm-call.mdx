@@ -36,8 +36,7 @@ For every managed LLM request, Relay automatically propagates agent lineage to
 Dynamo using `x-dynamo-session-id` and, when a parent agent scope is active,
 `x-dynamo-parent-session-id`. The current and parent IDs come from the most
 recent explicit `Agent` scopes in the active scope stack; the implicit root
-scope is ignored. Turn scopes are always `Custom` scopes and do not change
-agent lineage. Harness session metadata is used when present; application
+scope is ignored. Harness session metadata is used when present; application
 scope names are used otherwise. No plugin or configuration is required.
 
 If you want Relay to add cost estimates, initialize the built-in `pricing`
