@@ -9,6 +9,9 @@
 //! Native plugins built with it communicate with a host through versioned
 //! C-compatible tables and host-owned string handles.
 
+#[cfg(test)]
+extern crate self as nemo_relay_plugin;
+
 mod async_sdk;
 
 pub use async_sdk::{LlmJsonAsyncStream, LlmNext, LlmStreamNext, NativeExecutorConfig, ToolNext};
@@ -3607,3 +3610,8 @@ macro_rules! nemo_relay_plugin {
         }
     };
 }
+
+#[cfg(test)]
+#[allow(clippy::macro_metavars_in_unsafe)]
+#[path = "../tests/typed_callbacks.rs"]
+mod typed_callbacks;
