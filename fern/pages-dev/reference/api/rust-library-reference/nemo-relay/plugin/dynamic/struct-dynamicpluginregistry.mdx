@@ -2,7 +2,7 @@
 title: "Struct Dynamic Plugin Registry"
 sidebar-title: "DynamicPluginRegistry"
 description: "In-memory dynamic plugin registry used by the control plane."
-position: 15
+position: 17
 ---
 {/* SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0 */}
@@ -112,6 +112,14 @@ Replaces the resolved worker environment and its validation state.
 <pre className="rust-signature"><code dangerouslySetInnerHTML={{"__html": "pub fn update_policy_status(\n    &amp;mut self,\n    plugin_id: &amp;<a href=\"https://doc.rust-lang.org/1.96.1/std/primitive.str.html\">str</a>,\n    policy_satisfied: <a href=\"enum-dynamicplugincheckstate\">DynamicPluginCheckState</a>,\n    startup_class: <a href=\"enum-dynamicpluginstartupclass\">DynamicPluginStartupClass</a>,\n    attestation_mode: <a href=\"enum-dynamicpluginattestationmode\">DynamicPluginAttestationMode</a>,\n    last_error: <a href=\"https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html\">Option</a>&lt;<a href=\"struct-dynamicpluginfailure\">DynamicPluginFailure</a>&gt;,\n) -&gt; <a href=\"../type-result\">Result</a>&lt;<a href=\"https://doc.rust-lang.org/1.96.1/std/primitive.unit.html\">()</a>&gt;"}} /></pre>
 
 Replaces the current host-policy outcome without mutating desired state.
+
+#### `replace_declaration`
+
+<pre className="rust-signature"><code dangerouslySetInnerHTML={{"__html": "pub fn replace_declaration(\n    &amp;mut self,\n    plugin_id: &amp;<a href=\"https://doc.rust-lang.org/1.96.1/std/primitive.str.html\">str</a>,\n    replacement: <a href=\"struct-dynamicpluginrecord\">DynamicPluginRecord</a>,\n) -&gt; <a href=\"../type-result\">Result</a>&lt;<a href=\"https://doc.rust-lang.org/1.96.1/std/primitive.unit.html\">()</a>&gt;"}} /></pre>
+
+Replaces declaration-owned fields while preserving lifecycle-owned state.
+
+The replacement must describe the same plugin ID. Desired state, runtime state, and durable lifecycle metadata remain attached to the existing record.
 
 ## Trait Implementations
 

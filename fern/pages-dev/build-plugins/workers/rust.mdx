@@ -7,7 +7,7 @@ position: 32
 SPDX-License-Identifier: Apache-2.0 */}
 
 The `examples/rust-grpc-worker-plugin` project is the compiled counterpart to the
-[Python worker](/build-plugins/workers/python). It depends on `nemo-relay-worker` 0.9.0,
+[Python worker](/build-plugins/workers/python). It depends on `nemo-relay-worker` 0.10.0,
 implements `WorkerPlugin`, registers all
 15 [surfaces](/build-plugins/workers/middleware-and-continuations), and lets the SDK
 create the authenticated `grpc-v1` server from the
@@ -68,7 +68,7 @@ id = "examples.rust_grpc_worker"
 kind = "worker"
 
 [compat]
-relay = ">=0.8.0,<1.0"
+relay = ">=0.9.0,<1.0"
 worker_protocol = "grpc-v1"
 
 [defaults]
@@ -91,11 +91,11 @@ runtime = "rust"
 entrypoint = "target/debug/<platform-worker-file>"
 ```
 
-The worker speaks `grpc-v1`, whose Relay 0.8 tool-result baseline requires
-`relay = ">=0.8.0,<1.0"`. `ToolNext::call` returns `ToolExecutionResult`, preserving an
-application payload and optional opaque annotation separately from Relay-owned pending
-marks. Rebuild the worker when adopting this SDK release; the protocol name remains
-`grpc-v1`, but an earlier generated binding cannot read the structural result messages.
+The manifest requires Relay 0.9 because this worker uses the context-aware tool execution
+callback contract. The protocol identifier remains `grpc-v1`. `ToolNext::call` returns
+`ToolExecutionResult`, preserving an application payload and optional opaque annotation
+separately from Relay-owned pending marks. Rebuild the worker when adopting this SDK
+release.
 
 The artifact and entrypoint paths must identify the same executable. Relay verifies the
 artifact digest before it starts the command, and the worker
@@ -136,7 +136,7 @@ publish = false
 
 [dependencies]
 futures-util = "0.3"
-nemo-relay-worker = { version = "0.9.0", path = "../../crates/worker" }
+nemo-relay-worker = { version = "0.10.0", path = "../../crates/worker" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

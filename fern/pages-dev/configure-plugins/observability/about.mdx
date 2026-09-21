@@ -19,7 +19,7 @@ manual subscribers. A common first path is:
 1. Instrument one scope, tool call, or LLM call in your application.
 2. Enable the Observability plugin with only one exporter, such as ATOF JSONL.
 3. Run one request through the instrumented path.
-4. Clear the plugin, or call the manual exporter's documented barrier.
+4. Close the activation, or call the manual exporter's documented barrier.
 5. Confirm the output before adding more exporters or sanitization rules.
 
 Observability in NeMo Relay starts with events. Scopes, marks, managed tool
@@ -87,9 +87,8 @@ Use the barrier that matches how you manage the exporter lifecycle:
   callback side effects.
 - For a manual exporter, call its documented `force_flush()`, `export()`, or
   `shutdown()` operation.
-- For plugin-managed export, call `plugin.clear()` or
-  `clear_plugin_configuration()` during graceful shutdown. From a Python
-  `asyncio` task, await `plugin.clear_async()` instead.
+- For plugin-managed export, retain the `PluginHostActivation` returned by
+  initialization and call its `close()` operation during graceful shutdown.
 
 If the process terminates before those operations complete, the output can omit
 queued telemetry even when the instrumented application work completed
@@ -144,8 +143,9 @@ before adding more exporters or extra config layers.
 
 When ATIF and trace exporters observe the same NeMo Relay events, they share
 NeMo Relay UUIDs for cross-format joins. Plugin-managed ATIF uses the top-level
-trajectory root scope UUID as the trajectory `session_id`. ATIF step lineage stores the
-event UUID as `step.extra.ancestry.function_id` and the parent UUID as
+trajectory scope UUID as `trajectory_id` and uses the propagation root UUID as
+the run-scoped `session_id` when one is present. ATIF step lineage stores the event UUID as
+`step.extra.ancestry.function_id` and the parent UUID as
 `step.extra.ancestry.parent_id`.
 
 The `full` and `openinference` OpenTelemetry projections carry the same values
@@ -159,11 +159,13 @@ additionally carry the logical `session.id`, optional `user.id`, and Relay-owned
 `nemo_relay.session.instance_id`. The instance value is the existing root scope
 UUID and is shared across trace roots created by the same runtime session.
 The `gen_ai` projection uses the standard `gen_ai.conversation.id` when the
-event supplies a conversation, session, or thread identifier. Typed endpoints
-derive the same native trace and span IDs from the same Relay lifecycle UUIDs,
-so the backend IDs also correlate across exporters. ATIF keeps its existing
-artifact IDs and exposes the logical coding-session values under
-`extra.nemo_relay`.
+event supplies a conversation, session, or thread identifier. Coding-agent LLM
+events prefer an explicit provider conversation identifier and otherwise use
+the resolved logical harness session identifier. Typed endpoints derive the
+same native trace and span IDs from the same Relay lifecycle UUIDs, so the
+backend IDs also correlate across exporters. ATIF artifact filenames and storage
+keys remain based on the trajectory scope UUID. Logical coding-session values
+also remain available under `extra.nemo_relay`.
 
 ## Pages
 

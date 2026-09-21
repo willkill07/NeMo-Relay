@@ -52,8 +52,9 @@ Plugin-managed files also expose selected correlation fields under
 `extra.nemo_relay`: `session_id` is the logical harness session ID,
 `session_instance_id` is Relay's root scope UUID, and `user_id` is present when
 session metadata contains a top-level string value. The top-level ATIF
-`session_id`, `trajectory_id`, `{session_id}` filename expansion, and remote
-session header remain trajectory-unique artifact identities for compatibility.
+`trajectory_id`, the historical `{session_id}` filename expansion, and the
+remote session header remain trajectory-unique artifact identities. A rooted
+propagation context uses its root as the serialized ATIF `session_id`.
 
 ## Fields
 
@@ -68,8 +69,26 @@ The following table describes the top-level ATIF settings:
 | `tool_definitions` | Omitted | Optional ATIF tool metadata. |
 | `extra` | Omitted | Optional ATIF agent metadata. |
 | `output_directory` | Current working directory | Directory containing trajectory files and the recovery copy when every configured remote destination fails. |
-| `filename_template` | `nemo-relay-atif-{session_id}.json` | Must contain `{session_id}`. Can contain `{metadata.<path>}` placeholders for metadata-based routing. |
+| `filename_template` | `nemo-relay-atif-{session_id}.json` | Must contain the historical `{session_id}` placeholder, which expands to the trajectory scope UUID. Can contain `{metadata.<path>}` placeholders for metadata-based routing. |
 | `storage` | Omitted | Optional list of remote storage destinations. When non-empty, trajectories are uploaded to every configured backend. If all fail for one trajectory, Relay writes a local recovery copy. Refer to [Remote Storage](#remote-storage). |
+
+### Run-Scoped Session IDs
+
+Capture the default propagation context when the current Relay root carries a
+run identifier such as an upstream UUID `request_id`:
+
+```toml
+[components.config.atif]
+enabled = true
+output_directory = "logs"
+filename_template = "trajectory-{session_id}.json"
+```
+
+For a top-level Agent scope, Relay emits the propagation root as the ATIF
+`session_id` and keeps the Agent scope UUID as `trajectory_id`. The filename,
+remote storage key, and remote session header continue to use the Agent scope
+UUID so multiple trajectories in one run cannot overwrite each other. Use
+rootless propagation when a receiver must start a new local session.
 
 ### Metadata-Based Paths
 
@@ -85,7 +104,7 @@ filename_template = "{metadata.atif_prefix:-unassigned}/trajectory-{session_id}.
 ```
 
 With scope metadata `{"atif_prefix":"tenant-a/session-123"}`, Relay writes
-`logs/tenant-a/session-123/trajectory-<scope-uuid>.json`. The template must
+`logs/tenant-a-session-123/trajectory-<scope-uuid>.json`. The template must
 still contain `{session_id}`.
 
 Use `:-` to provide a literal fallback when metadata can be absent, for example
@@ -93,16 +112,26 @@ Use `:-` to provide a literal fallback when metadata can be absent, for example
 metadata field is absent or `null`. A present non-string value is rejected
 instead of being routed through the fallback.
 
-Each metadata placeholder must resolve to a string containing a non-empty,
-relative path fragment. Slash-separated segments can contain ASCII letters,
-digits, `-`, `_`, `.`, and `~`. Relay rejects empty segments, `.` and `..`
-segments, absolute paths, backslashes, spaces, and other characters. If a
-placeholder is missing without a fallback, is present but non-string, or
-resolves to an unsafe value, Relay skips that trajectory. It records a runtime
-diagnostic in `plugin.report()` and causes plugin teardown to fail. Literal
-template text must also be a relative, traversal-free path. The rendered
-filename applies to local, S3, and HTTP storage in the same way as a static
-filename.
+Relay sanitizes a present string metadata value into one filename fragment
+before rendering it. ASCII letters, digits, `-`, `_`, `.`, and `~` are kept;
+every consecutive group of other characters, including `/`, is replaced with
+one `-`. Metadata placeholders therefore do not create directory levels. For
+example, `tenant-a/session-123` becomes `tenant-a-session-123`, and
+`../tenant` becomes `-tenant`.
+
+Use a prevalidated identifier when distinct metadata values must produce
+distinct paths: sanitization is lossy, so different input values can produce
+the same fragment. A literal `:-` fallback is not sanitized and must itself be
+a non-empty, safe relative path fragment; it can contain slash-separated
+segments with ASCII letters, digits, `-`, `_`, `.`, and `~`. Relay rejects
+empty segments, `.` and `..` segments, absolute paths, backslashes, spaces,
+and other characters in a fallback.
+
+If a placeholder is missing without a fallback, is present but non-string, or
+sanitizes to an empty value, Relay skips that trajectory. It records a runtime
+diagnostic and causes `activation.close()` to fail. Literal template text must
+also be a relative, traversal-free path. The rendered filename applies to
+local, S3, and HTTP storage in the same way as a static filename.
 
 The CLI gateway parses `x-nemo-relay-session-metadata` as JSON and merges it
 into the top-level scope metadata:
@@ -156,8 +185,8 @@ timeout_millis = 3000
 [components.config.atif.storage.headers]
 x-team = "agent-platform"
 
-[components.config.atif.storage.header_env]
-authorization = "NEMO_RELAY_ATIF_HTTP_AUTH"
+[components.config.atif.storage.header_file]
+authorization = "/var/run/secrets/telemetry/token"
 ```
 
 The HTTP backend sends one `POST` per completed trajectory. The request body is
@@ -165,6 +194,10 @@ the rendered ATIF JSON file with `content-type: application/json`. NeMo Relay
 also sets `x-nemo-relay-atif-filename` and
 `x-nemo-relay-atif-session-id` headers so receivers can keep the same object
 identity that local files and S3 uploads use.
+
+For an OIDC token-file flow, have the token writer produce the complete header
+value, such as `Bearer eyJ...`, at
+`/var/run/secrets/telemetry/token`; Relay does not add a `Bearer ` prefix.
 
 HTTP `2xx` responses are treated as success. Any non-`2xx` response or
 transport error records a runtime delivery diagnostic. Relay attempts every
@@ -179,7 +212,14 @@ The following table describes HTTP storage settings:
 | `endpoint` | required | Destination `http://` or `https://` URL. |
 | `headers` | `{}` | Static request headers. |
 | `header_env` | `{}` | Header names mapped to environment variable names containing secret values. |
+| `header_file` | `{}` | Maps header names to regular files read before each completed-trajectory upload. Files must exist at activation. Relay removes trailing whitespace. A header name cannot also appear in `headers` or `header_env`, even with different letter case. |
 | `timeout_millis` | `3000` | Per-request timeout in milliseconds. Must be positive. |
+
+When you set any header source (`headers`, `header_env`, or `header_file`),
+remote HTTP storage must use HTTPS. HTTP is allowed only for localhost and
+loopback IP addresses. Relay does not follow redirects when headers are set.
+Use the final destination URL. A redirect fails that upload and Relay does not
+send headers to the new destination.
 
 ### Multiple Destinations
 
@@ -247,15 +287,13 @@ delivery diagnostic and retries that destination for each later trajectory.
 Other destinations continue to receive writes. When every remote destination
 fails for one trajectory, Relay writes a local recovery copy under
 `output_directory`; a successful remote destination does not create that copy.
-The diagnostic becomes visible in `plugin.report()` after subscriber delivery
-is flushed and is retained there after a failed teardown. Teardown also reports
+The diagnostic is logged after subscriber delivery is flushed. Teardown also reports
 the degraded delivery, even when the local recovery write succeeds. This error
 reports delivery degradation, not a registration leak; callbacks have already
-been removed. If the failure is still pending when initialization replaces the
-configuration, that replacement returns the delivery error and leaves no
-configuration active; a subsequent clear or initialization is safe. Fatal
-dispatcher failures, such as trajectory serialization failures, are also
-reported during teardown.
+been removed. If the failure is still pending when `activation.close()` runs,
+the close returns the delivery error after removing callbacks. Fatal dispatcher
+failures, such as trajectory serialization failures, are also reported during
+teardown.
 
 ## Expected Output
 
@@ -277,9 +315,12 @@ incomplete.
 
 To correlate ATIF with typed OpenTelemetry traces from the same run,
 join on NeMo Relay UUIDs. The plugin-managed ATIF `session_id` is the
-top-level trajectory root scope UUID. Each step's `extra.ancestry.function_id` is the event UUID,
-and `extra.ancestry.parent_id` is the parent event UUID. Trace spans expose the
-same values as `nemo_relay.uuid` and `nemo_relay.parent_uuid` attributes.
+propagated root UUID when one is present, otherwise the top-level trajectory
+scope UUID. The ATIF `trajectory_id` remains
+the top-level trajectory scope UUID. Each step's
+`extra.ancestry.function_id` is the event UUID, and
+`extra.ancestry.parent_id` is the parent event UUID. Trace spans expose the same
+values as `nemo_relay.uuid` and `nemo_relay.parent_uuid` attributes.
 
 When present, a step's `metrics` can carry `prompt_tokens`, `completion_tokens`,
 `cached_tokens` (cache read + write), and `cost_usd` (USD only); the trajectory
@@ -303,10 +344,11 @@ Use plugin configuration when the application should let NeMo Relay own the ATIF
 dispatcher lifecycle. The following examples configure and activate the ATIF
 exporter through each supported language binding.
 
-`validate()` checks only the supplied in-memory object. `initialize()` also
-layers discovered `plugins.toml` configuration. For effective file-backed
-validation, refer to [Plugin Configuration Files](/configure-plugins/plugin-configuration-files)
-and run the gateway with the same configuration path that production uses.
+`validate()` resolves the same configuration layers as `initialize()` without
+loading plugin code or acquiring the activation lease. Use Python/Rust
+`validate_exact()`, Node.js `validateExact()`, or Go `ValidateExact()` when only
+the supplied static configuration should be checked. For complete
+layering rules, refer to [Plugin Configuration Files](/configure-plugins/plugin-configuration-files).
 
 <Tabs>
 <Tab title="Python" language="python">
@@ -333,17 +375,14 @@ config = plugin.PluginConfig(
     ]
 )
 
-report = plugin.validate(config)
+report = plugin.validate(config)["config"]
 if any(diagnostic["level"] == "error" for diagnostic in report["diagnostics"]):
     raise RuntimeError(report["diagnostics"])
 
-async def main():
-    await plugin.initialize(config)
-    try:
+async def main() -> None:
+    async with plugin.activate(config):
         # Run instrumented application work here.
         pass
-    finally:
-        await plugin.clear_async()
 
 asyncio.run(main())
 ```
@@ -356,7 +395,7 @@ const plugin = require("nemo-relay-node/plugin");
 const observability = require("nemo-relay-node/observability");
 
 void (async () => {
-  await plugin.initialize({
+  const activation = await plugin.initialize({
     version: 1,
     components: [
       observability.ComponentSpec({
@@ -376,7 +415,7 @@ void (async () => {
   try {
     // Run instrumented application work here.
   } finally {
-    plugin.clear();
+    await activation.close();
   }
 })().catch((error) => {
   console.error(error);
@@ -393,9 +432,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use nemo_relay::observability::plugin_component::{
     AtifSectionConfig, ComponentSpec, ObservabilityConfig,
 };
-use nemo_relay::plugin::{
-    clear_plugin_configuration, initialize_plugins, validate_plugin_config, PluginConfig,
-};
+use nemo_relay::plugin::PluginConfig;
+use nemo_relay::plugin::dynamic::{initialize, validate};
 
 let component = ComponentSpec::new(ObservabilityConfig {
     atif: Some(AtifSectionConfig {
@@ -416,14 +454,14 @@ let config = PluginConfig {
     policy: Default::default(),
 };
 
-let report = validate_plugin_config(&config);
-assert!(!report.has_errors());
+let report = validate(config.clone(), None)?;
+assert!(!report.config.has_errors());
 
-let _active = initialize_plugins(config).await?;
+let mut activation = initialize(config, None).await?;
 
 // Run instrumented application work here.
 
-clear_plugin_configuration()?;
+activation.close()?;
 Ok(())
 }
 ```

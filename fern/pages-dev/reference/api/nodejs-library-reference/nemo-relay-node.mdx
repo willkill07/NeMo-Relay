@@ -251,6 +251,36 @@ export interface ToolExecutionResult {
 }
 ```
 
+### `ToolExecutionContext`
+
+Per-call context delivered to a tool execution intercept.
+
+`toolCallId` is the provider-issued correlation identifier recorded on the managed tool call, or `null` when the call did not record one. It lets an intercept that completes execution without invoking the remaining chain associate its result with the originating tool call.
+
+```ts
+export interface ToolExecutionContext {
+  toolName: string
+  args: Json
+  toolCallId: string | null
+}
+```
+
+### `PendingMarkSpec`
+
+A mark Relay materializes under a managed lifecycle.
+
+```ts
+export interface PendingMarkSpec {
+  name: string
+  category?: string | null
+  categoryProfile?: Json
+  data?: Json
+  dataSchema?: { name: string; version: string } | null
+  metadata?: Json
+  severity?: 'trace' | 'debug' | 'info' | 'warn' | 'warning' | 'error' | null
+}
+```
+
 ### `EventSanitizeFields`
 
 Observability fields returned by mark and scope event sanitizers.
@@ -260,6 +290,131 @@ export interface EventSanitizeFields {
   data?: Json
   categoryProfile?: Json
   metadata?: Json
+}
+```
+
+### `LlmSanitizeRequestContext`
+
+Codec context available while an LLM request is sanitized.
+
+```ts
+export interface LlmSanitizeRequestContext {
+  codec: LlmCodecIdentity;
+  /** Resolve the active codec for this callback. Do not retain the result after the callback returns. */
+  resolveCodec(): import('./typed').LlmCodec | null;
+}
+```
+
+### `LlmSanitizeResponseContext`
+
+Codec context available while an LLM response is sanitized.
+
+```ts
+export interface LlmSanitizeResponseContext {
+  codec: LlmCodecIdentity;
+  /** Resolve the active codec for this callback. Do not retain the result after the callback returns. */
+  resolveCodec(): import('./typed').LlmResponseCodec | null;
+}
+```
+
+### `LlmOptimizationDataSchema`
+
+Schema tag attached to an opaque optimization contribution payload.
+
+```ts
+export interface LlmOptimizationDataSchema {
+  name: string;
+  version: string;
+}
+```
+
+### `LlmOptimizationModel`
+
+Model identity retained for counterfactual pricing and downstream repricing.
+
+```ts
+export interface LlmOptimizationModel {
+  model: string;
+  provider?: string;
+}
+```
+
+### `LlmOptimizationModelTransition`
+
+Baseline and effective model identities for a routing optimization.
+
+```ts
+export interface LlmOptimizationModelTransition {
+  baseline?: LlmOptimizationModel;
+  effective?: LlmOptimizationModel;
+}
+```
+
+### `LlmOptimizationTokens`
+
+Explicit token evidence, independent from a pricing catalog.
+
+```ts
+export interface LlmOptimizationTokens {
+  /** Token counts must be non-negative JavaScript safe integers. */
+  prompt_tokens?: number;
+  /** Token counts must be non-negative JavaScript safe integers. */
+  completion_tokens?: number;
+  /** Token counts must be non-negative JavaScript safe integers. */
+  cache_read_tokens?: number;
+  /** Token counts must be non-negative JavaScript safe integers. */
+  cache_write_tokens?: number;
+  /** Token counts must be non-negative JavaScript safe integers. */
+  total_tokens?: number;
+}
+```
+
+### `LlmOptimizationTokenImpact`
+
+Baseline, effective, and saved token evidence for one optimization.
+
+```ts
+export interface LlmOptimizationTokenImpact {
+  baseline?: LlmOptimizationTokens;
+  effective?: LlmOptimizationTokens;
+  saved?: LlmOptimizationTokens;
+  quality?: 'observed' | 'estimated';
+  estimation_method?: string;
+}
+```
+
+### `LlmOptimizationContribution`
+
+One plugin's optimization evidence.
+
+`kind` is deliberately an open string so new optimizer categories round-trip without a Relay release. Unknown top-level fields are retained by the wire contract and represented by this interface's JSON extension surface.
+
+```ts
+export interface LlmOptimizationContribution {
+  id?: string;
+  /** Relay ordering must remain within JavaScript's safe-integer range. */
+  sequence?: number;
+  producer: string;
+  kind: 'input_compression' | 'model_routing' | (string & {});
+  applied: boolean;
+  model_transition?: LlmOptimizationModelTransition;
+  token_impact?: LlmOptimizationTokenImpact;
+  payload_schema?: LlmOptimizationDataSchema;
+  payload?: Json;
+  [key: string]: Json | undefined;
+}
+```
+
+### `LlmRequestInterceptOutcome`
+
+Canonical result returned by an LLM request intercept.
+
+```ts
+export interface LlmRequestInterceptOutcome {
+  request: Json;
+  annotated?: Json | null;
+  pendingMarks?: PendingMarkSpec[];
+  optimizationContributions?: LlmOptimizationContribution[];
 }
 ```
 
@@ -443,23 +598,22 @@ export declare class AdaptiveRuntime {
 }
 ```
 
-### `DynamicPluginActivation`
+### `PluginHostActivation`
 
 Owned dynamic plugin activation.
 
 Keep this object alive while code may invoke callbacks registered by the dynamic plugins. Call `close()` for deterministic cleanup; garbage collection performs the same cleanup as a defensive fallback.
 
 ```ts
-export declare class DynamicPluginActivation {
+export declare class PluginHostActivation {
   /** Return the validation report produced by activation. */
   get report(): Json
   /**
    * Return whether this activation handle has not begun teardown.
    *
-   * `false` does not guarantee another process-wide activation can start;
-   * failed teardown may intentionally retain the activation owner.
+   * Failed teardown leaves the activation active so `close()` can retry.
    */
-  get active(): boolean
+  get isActive(): boolean
   /**
    * Clear plugin callbacks before unloading libraries and workers.
    *
@@ -801,6 +955,44 @@ export const enum MetricTemporality {
 
 ## Functions
 
+### `log`
+
+Emit a structured operational log record through Relay's configured sinks.
+
+```ts
+export declare function log(level: string, message: string, target?: string | undefined | null, fields?: Json | undefined | null): void
+```
+
+### `trace`
+
+```ts
+export declare function trace(message: string, target?: string | undefined | null, fields?: Json | undefined | null): void
+```
+
+### `debug`
+
+```ts
+export declare function debug(message: string, target?: string | undefined | null, fields?: Json | undefined | null): void
+```
+
+### `info`
+
+```ts
+export declare function info(message: string, target?: string | undefined | null, fields?: Json | undefined | null): void
+```
+
+### `warn`
+
+```ts
+export declare function warn(message: string, target?: string | undefined | null, fields?: Json | undefined | null): void
+```
+
+### `error`
+
+```ts
+export declare function error(message: string, target?: string | undefined | null, fields?: Json | undefined | null): void
+```
+
 ### `pushStreamChunk`
 
 Push a chunk into the stream identified by `streamId`. Called from JavaScript during async generator iteration.
@@ -831,6 +1023,14 @@ Capture the current Relay causal parent for application-managed transport.
 
 ```ts
 export declare function capturePropagationContext(): PropagationContext
+```
+
+### `captureRootlessPropagationContext`
+
+Capture the current Relay causal parent without a propagation root.
+
+```ts
+export declare function captureRootlessPropagationContext(): PropagationContext
 ```
 
 ### `capturePropagationContextWithRoot`
@@ -1102,7 +1302,7 @@ Register a global event metadata injector.
 The callback receives an immutable event snapshot and may return additions directly or in a Promise. Relay validates and merges accepted additions before event sanitizers run.
 
 ```ts
-export declare function registerEventMetadataInjector(name: string, priority: number, injector: (event: Json) => import('./plugin').EventMetadata | Promise<import('./plugin').EventMetadata>): void
+export declare function registerEventMetadataInjector(name: string, priority: number, injector: (event: Json) => EventMetadata | Promise<EventMetadata>): void
 ```
 
 ### `deregisterEventMetadataInjector`
@@ -1269,17 +1469,17 @@ export declare function deregisterToolRequestIntercept(name: string): boolean
 
 Register a tool execution intercept following the middleware chain pattern.
 
-The `callable` receives the args and a `next` function. Call `next(args)` to invoke the next intercept or original implementation; skip calling `next` to short-circuit the chain. `next` may be called repeatedly or concurrently while `callable` is pending; each call receives an isolated scope-stack branch, and unfinished or later calls reject after `callable` settles.
+The `callable` receives `ToolExecutionContext` and `next`. The context exposes `toolName`, `args`, and `toolCallId`; `toolCallId` is `null` when the managed call has no provider-issued correlation identifier. Call `next(context.args)` to continue the chain, or return an outcome directly to short-circuit execution.
 
 ```ts
-export declare function registerToolExecutionIntercept(name: string, priority: number, callable: (args: Json, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>): void
+export declare function registerToolExecutionIntercept(name: string, priority: number, callable: (context: ToolExecutionContext, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<PendingMarkSpec> }>): void
 ```
 
 ### `deregisterToolExecutionIntercept`
 
 Deregister a tool execution intercept by name.
 
-Returns `true` if an intercept with that name was found and removed.
+Removes an intercept registered through either registration shape. Returns `true` if an intercept with that name was found and removed.
 
 ```ts
 export declare function deregisterToolExecutionIntercept(name: string): boolean
@@ -1292,7 +1492,7 @@ Register a guardrail that sanitizes LLM request data before execution.
 The `guardrail` callback receives `(request, context)` and must return the sanitized request, or `null` to omit the observability payload. Lower `priority` values run first. Throws if a guardrail with the same `name` already exists. If the callback throws, Relay omits the payload and annotation, continues publication, and records the error for `getLastCallbackError()`.
 
 ```ts
-export declare function registerLlmSanitizeRequestGuardrail(name: string, priority: number, guardrail: (request: Json, context: import('./plugin').LlmSanitizeRequestContext) => Json | null | Promise<Json | null>): void
+export declare function registerLlmSanitizeRequestGuardrail(name: string, priority: number, guardrail: (request: Json, context: LlmSanitizeRequestContext) => Json | null | Promise<Json | null>): void
 ```
 
 ### `deregisterLlmSanitizeRequestGuardrail`
@@ -1312,7 +1512,7 @@ Register a guardrail that sanitizes LLM response data after execution.
 The `guardrail` callback receives `(response, context)` and must return the sanitized response, or `null` to omit the observability payload. Lower `priority` values run first. Throws if a guardrail with the same `name` already exists. If the callback throws, Relay omits the payload and annotation, continues publication, and records the error for `getLastCallbackError()`.
 
 ```ts
-export declare function registerLlmSanitizeResponseGuardrail(name: string, priority: number, guardrail: (response: Json, context: import('./plugin').LlmSanitizeResponseContext) => Json | null | Promise<Json | null>): void
+export declare function registerLlmSanitizeResponseGuardrail(name: string, priority: number, guardrail: (response: Json, context: LlmSanitizeResponseContext) => Json | null | Promise<Json | null>): void
 ```
 
 ### `deregisterLlmSanitizeResponseGuardrail`
@@ -1352,7 +1552,7 @@ Register an intercept that transforms LLM request data.
 The `callable` receives the `LlmRequest` (as JSON) and returns a transformed request. If `breakChain` is `true`, no lower-priority intercepts run after this one. Higher `priority` values run first. If the callback throws, the managed call rejects and later middleware does not run.
 
 ```ts
-export declare function registerLlmRequestIntercept(name: string, priority: number, breakChain: boolean, callable: (args: { name: string; request: Json; annotated: Json | null }) => import('./plugin').LlmRequestInterceptOutcome | Promise<import('./plugin').LlmRequestInterceptOutcome>): void
+export declare function registerLlmRequestIntercept(name: string, priority: number, breakChain: boolean, callable: (args: { name: string; request: Json; annotated: Json | null }) => LlmRequestInterceptOutcome | Promise<LlmRequestInterceptOutcome>): void
 ```
 
 ### `deregisterLlmRequestIntercept`
@@ -1444,7 +1644,7 @@ export declare function flushSubscribers(): Promise<void>
 Register an event metadata injector owned by an active scope.
 
 ```ts
-export declare function scopeRegisterEventMetadataInjector(scopeUuid: string, name: string, priority: number, injector: (event: Json) => import('./plugin').EventMetadata | Promise<import('./plugin').EventMetadata>): void
+export declare function scopeRegisterEventMetadataInjector(scopeUuid: string, name: string, priority: number, injector: (event: Json) => EventMetadata | Promise<EventMetadata>): void
 ```
 
 ### `scopeDeregisterEventMetadataInjector`
@@ -1587,17 +1787,17 @@ export declare function scopeDeregisterToolRequestIntercept(scopeUuid: string, n
 
 Register a scope-local tool execution intercept following the middleware chain pattern.
 
-The `callable` receives the args and a `next` function. Call `next(args)` to invoke the next intercept or original implementation; skip calling `next` to short-circuit the chain. `next` may be called repeatedly or concurrently while `callable` is pending; each call receives an isolated scope-stack branch, and unfinished or later calls reject after `callable` settles.
+The `callable` receives `ToolExecutionContext` and `next`. The context exposes `toolName`, `args`, and `toolCallId`; `toolCallId` is `null` when the managed call has no provider-issued correlation identifier. Call `next(context.args)` to continue the chain, or return an outcome directly to short-circuit execution.
 
 ```ts
-export declare function scopeRegisterToolExecutionIntercept(scopeUuid: string, name: string, priority: number, callable: (args: Json, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>): void
+export declare function scopeRegisterToolExecutionIntercept(scopeUuid: string, name: string, priority: number, callable: (context: ToolExecutionContext, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<PendingMarkSpec> }>): void
 ```
 
 ### `scopeDeregisterToolExecutionIntercept`
 
 Deregister a scope-local tool execution intercept by name.
 
-Returns `true` if an intercept with that name was found and removed from the specified scope.
+Removes an intercept registered through either registration shape. Returns `true` if an intercept with that name was found and removed from the specified scope.
 
 ```ts
 export declare function scopeDeregisterToolExecutionIntercept(scopeUuid: string, name: string): boolean
@@ -1610,7 +1810,7 @@ Register a scope-local guardrail that sanitizes LLM request data before executio
 The `guardrail` callback receives `(request, context)` and must return the sanitized request, or `null` to omit the observability payload. Lower `priority` values run first. Throws if a guardrail with the same `name` already exists on the specified scope. If the callback throws, Relay omits the payload and annotation, continues publication, and records the error for `getLastCallbackError()`.
 
 ```ts
-export declare function scopeRegisterLlmSanitizeRequestGuardrail(scopeUuid: string, name: string, priority: number, guardrail: (request: Json, context: import('./plugin').LlmSanitizeRequestContext) => Json | null | Promise<Json | null>): void
+export declare function scopeRegisterLlmSanitizeRequestGuardrail(scopeUuid: string, name: string, priority: number, guardrail: (request: Json, context: LlmSanitizeRequestContext) => Json | null | Promise<Json | null>): void
 ```
 
 ### `scopeDeregisterLlmSanitizeRequestGuardrail`
@@ -1630,7 +1830,7 @@ Register a scope-local guardrail that sanitizes LLM response data after executio
 The `guardrail` callback receives `(response, context)` and must return the sanitized response, or `null` to omit the observability payload. Lower `priority` values run first. Throws if a guardrail with the same `name` already exists on the specified scope. If the callback throws, Relay omits the payload and annotation, continues publication, and records the error for `getLastCallbackError()`.
 
 ```ts
-export declare function scopeRegisterLlmSanitizeResponseGuardrail(scopeUuid: string, name: string, priority: number, guardrail: (response: Json, context: import('./plugin').LlmSanitizeResponseContext) => Json | null | Promise<Json | null>): void
+export declare function scopeRegisterLlmSanitizeResponseGuardrail(scopeUuid: string, name: string, priority: number, guardrail: (response: Json, context: LlmSanitizeResponseContext) => Json | null | Promise<Json | null>): void
 ```
 
 ### `scopeDeregisterLlmSanitizeResponseGuardrail`
@@ -1670,7 +1870,7 @@ Register a scope-local intercept that transforms LLM request data.
 The `callable` receives the `LlmRequest` (as JSON) and returns a transformed request. If `breakChain` is `true`, no lower-priority intercepts run after this one. Higher `priority` values run first. If the callback throws, the managed call rejects and later middleware does not run.
 
 ```ts
-export declare function scopeRegisterLlmRequestIntercept(scopeUuid: string, name: string, priority: number, breakChain: boolean, callable: (args: { name: string; request: Json; annotated: Json | null }) => import('./plugin').LlmRequestInterceptOutcome | Promise<import('./plugin').LlmRequestInterceptOutcome>): void
+export declare function scopeRegisterLlmRequestIntercept(scopeUuid: string, name: string, priority: number, breakChain: boolean, callable: (args: { name: string; request: Json; annotated: Json | null }) => LlmRequestInterceptOutcome | Promise<LlmRequestInterceptOutcome>): void
 ```
 
 ### `scopeDeregisterLlmRequestIntercept`
@@ -1764,7 +1964,7 @@ export declare function toolConditionalExecution(name: string, args: Json): Prom
 Run the registered LLM request intercept chain on the given request. The `request` should be a JSON object with `headers` and `content` fields matching the `LlmRequest` schema. Returns the transformed request as JSON.
 
 ```ts
-export declare function llmRequestIntercepts(name: string, request: Json): Promise<{ request: Json; annotated: Json | null; pendingMarks: Array<import('./plugin').PendingMarkSpec>; optimizationContributions: Array<{ id?: string; sequence?: number; producer: string; kind: 'input_compression' | 'model_routing' | (string & {}); applied: boolean; model_transition?: { baseline?: { model: string; provider?: string }; effective?: { model: string; provider?: string } }; token_impact?: { baseline?: { prompt_tokens?: number; completion_tokens?: number; cache_read_tokens?: number; cache_write_tokens?: number; total_tokens?: number }; effective?: { prompt_tokens?: number; completion_tokens?: number; cache_read_tokens?: number; cache_write_tokens?: number; total_tokens?: number }; saved?: { prompt_tokens?: number; completion_tokens?: number; cache_read_tokens?: number; cache_write_tokens?: number; total_tokens?: number }; quality?: 'observed' | 'estimated'; estimation_method?: string }; payload_schema?: { name: string; version: string }; payload?: Json; [key: string]: Json | undefined }> }>
+export declare function llmRequestIntercepts(name: string, request: Json): Promise<LlmRequestInterceptOutcome>
 ```
 
 ### `llmConditionalExecution`
@@ -1799,14 +1999,6 @@ Set manual latency sensitivity on the current scope.
 export declare function setLatencySensitivity(value: number): void
 ```
 
-### `validatePluginConfig`
-
-Validate a plugin config document and return a structured diagnostics report.
-
-```ts
-export declare function validatePluginConfig(config: Json): Json
-```
-
 ### `registerPlugin`
 
 Register a plugin backed by JavaScript callbacks.
@@ -1825,38 +2017,28 @@ Deregister a plugin by kind.
 export declare function deregisterPlugin(pluginKind: string): boolean
 ```
 
-### `initializePlugins`
+### `initialize`
 
-Initialize the active global plugin components.
+Initialize the core-owned static and dynamic plugin host from layered files.
 
 ```ts
-export declare function initializePlugins(config: Json): Promise<Json>
+export declare function initialize(config: Json, additionalPluginsToml?: string | undefined | null): Promise<PluginHostActivation>
 ```
 
-### `initializeWithDynamicPlugins`
+### `validate`
 
-Initialize with explicitly resolved dynamic plugins.
-
-`config` is layered over discovered `plugins.toml` files and may contain statically registered components; dynamic components are activated after that effective base configuration. At least one dynamic plugin is required. Static-only callers should use `initializePlugins`. The returned object owns all loaded libraries and worker processes. Its validation report is available through the `report` property.
+Validate dynamic plugins without loading any plugin code.
 
 ```ts
-export declare function initializeWithDynamicPlugins(config: Json, specs: Json): Promise<DynamicPluginActivation>
+export declare function validate(config: Json, additionalPluginsToml?: string | undefined | null): Json
 ```
 
-### `clearPluginConfiguration`
+### `validateExact`
 
-Clear the active global plugin configuration.
-
-```ts
-export declare function clearPluginConfiguration(): void
-```
-
-### `activePluginReport`
-
-Return the active plugin report or one retained after a teardown failure with runtime diagnostics.
+Validate only the supplied static plugin configuration.
 
 ```ts
-export declare function activePluginReport(): Json | null
+export declare function validateExact(config: Json): Json
 ```
 
 ### `listPluginKinds`
@@ -1865,5 +2047,42 @@ List registered plugin kinds.
 
 ```ts
 export declare function listPluginKinds(): Array<string>
+```
+
+## Type Aliases
+
+### `LlmCodecIdentity`
+
+Codec identity available while a managed LLM event is sanitized.
+
+```ts
+export type LlmCodecIdentity =
+  | { kind: 'none' }
+  | {
+      kind: 'builtin';
+```
+
+### `EventMetadataScalar`
+
+Scalar value accepted in event metadata additions.
+
+```ts
+export type EventMetadataScalar = string | number | boolean;
+```
+
+### `EventMetadataValue`
+
+Flat value accepted in event metadata additions. After JSON conversion, numeric arrays must contain only integer values or only floating-point values.
+
+```ts
+export type EventMetadataValue = EventMetadataScalar | string[] | number[] | boolean[];
+```
+
+### `EventMetadata`
+
+Metadata additions returned by an event metadata injector.
+
+```ts
+export type EventMetadata = Record<string, EventMetadataValue>;
 ```
 
