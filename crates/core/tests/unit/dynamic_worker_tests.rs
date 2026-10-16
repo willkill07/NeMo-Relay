@@ -5596,3 +5596,64 @@ async fn short_callbacks_keep_their_rpc_deadline() {
         .unwrap();
     assert_eq!(cancellation.invocation_id, invocation_id);
 }
+
+/// Keep scope IDs, kinds, and order when a worker reads a mixed scope stack.
+#[tokio::test]
+async fn scope_stack_snapshot_preserves_every_scope_kind_in_order() {
+    let state = Arc::new(WorkerHostRuntimeState::new(
+        ACTIVATION_ID.into(),
+        AUTH_TOKEN.into(),
+    ));
+    let stack = crate::api::runtime::create_scope_stack();
+    let base_count = crate::api::runtime::scope_stack_snapshot(&stack)
+        .unwrap()
+        .scopes
+        .len();
+    let kinds = [
+        (ScopeType::Agent, ProtoScopeType::Agent),
+        (ScopeType::Function, ProtoScopeType::Function),
+        (ScopeType::Tool, ProtoScopeType::Tool),
+        (ScopeType::Llm, ProtoScopeType::Llm),
+        (ScopeType::Retriever, ProtoScopeType::Retriever),
+        (ScopeType::Embedder, ProtoScopeType::Embedder),
+        (ScopeType::Reranker, ProtoScopeType::Reranker),
+        (ScopeType::Guardrail, ProtoScopeType::Guardrail),
+        (ScopeType::Evaluator, ProtoScopeType::Evaluator),
+        (ScopeType::Custom, ProtoScopeType::Custom),
+        (ScopeType::Unknown, ProtoScopeType::Unknown),
+    ];
+    let handles = crate::api::runtime::with_scope_stack(stack.clone(), || {
+        kinds
+            .iter()
+            .map(|(kind, _)| {
+                push_scope(
+                    PushScopeParams::builder()
+                        .name("snapshot-kind")
+                        .scope_type(*kind)
+                        .build(),
+                )
+            })
+            .collect::<FlowResult<Vec<_>>>()
+    })
+    .unwrap();
+    let id = state.insert_invocation_scope_stack(stack, None).unwrap();
+    let snapshot = WorkerHostRuntimeService {
+        state: state.clone(),
+    }
+    .get_current_scope_stack_snapshot(snapshot_request(Some(snapshot_context(&id))))
+    .await
+    .unwrap()
+    .into_inner()
+    .snapshot
+    .unwrap();
+    assert_eq!(snapshot.scopes.len(), base_count + kinds.len());
+    for ((entry, handle), (_, kind)) in snapshot.scopes[base_count..]
+        .iter()
+        .zip(&handles)
+        .zip(kinds)
+    {
+        assert_eq!(entry.scope_id, handle.uuid.to_string());
+        assert_eq!(entry.scope_type, kind as i32);
+    }
+    state.cleanup_invocation_scope_stack(&id);
+}
